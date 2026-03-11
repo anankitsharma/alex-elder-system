@@ -100,6 +100,11 @@ async def lifespan(app: FastAPI):
             logger.info("All Angel One API sessions active")
             market_feed.add_callback(on_tick_received)
             market_feed.add_callback(pipeline_manager.on_tick)
+            # Start WebSocket feed in background thread (connect() is blocking)
+            import threading
+            feed_thread = threading.Thread(target=market_feed.connect, daemon=True)
+            feed_thread.start()
+            logger.info("Market feed WebSocket starting in background thread")
         else:
             logger.warning("Some Angel One logins failed — running in offline mode")
     except asyncio.TimeoutError:
