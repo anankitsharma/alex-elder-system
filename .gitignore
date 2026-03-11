@@ -1,0 +1,34 @@
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+node_modules/
+.next/
+*.db
+*.sqlite3
+*.log
+.DS_Store
+Thumbs.db
+
+# Reference codebases (third-party, not part of this project)
+references/
+
+# Python cache
+.pytest_cache/
+
+# E2E screenshots
+frontend/e2e/*.png
+
+# Editor
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/
+
+# Playwright test results
+frontend/test-results/

@@ -1,0 +1,15 @@
+fastapi[standard]
+uvicorn[standard]
+smartapi-python
+pandas
+numpy
+pandas-ta
+pyotp
+python-dotenv
+sqlalchemy
+aiosqlite
+loguru
+apscheduler
+httpx
+websockets
+pydantic-settings

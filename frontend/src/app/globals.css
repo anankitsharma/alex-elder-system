@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Dark theme (default) ──────────────────────────── */
+  --color-background: #0a0a0f;
+  --color-foreground: #e4e4e7;
+  --color-surface: #111118;
+  --color-surface-2: #1a1a24;
+  --color-border: #27272a;
+  --color-border-light: #3f3f46;
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-green: #22c55e;
+  --color-red: #ef4444;
+  --color-blue: #3b82f6;
+  --color-amber: #f59e0b;
+  --color-muted: #71717a;
+
+  /* Sidebar */
+  --color-sidebar: #08080d;
+  --color-sidebar-muted: #4a4a55;
+  --color-sidebar-hover: #a1a1aa;
+  --color-sidebar-active: #13131a;
+
+  /* Utility surfaces */
+  --color-track: #1a1a24;
+  --color-tooltip: #18181f;
+  --color-tooltip-border: #2a2a35;
+  --color-tooltip-text: #d4d4d8;
+
+  /* Fonts */
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* ── Light theme ─────────────────────────────────────── */
+:root[data-theme="light"] {
+  --color-background: #F7F6F3;
+  --color-foreground: #1A1A1F;
+  --color-surface: #FFFFFF;
+  --color-surface-2: #F0EFEC;
+  --color-border: #E3E2DE;
+  --color-border-light: #D2D1CC;
+  --color-accent: #4F46E5;
+  --color-accent-hover: #4338CA;
+  --color-green: #15803D;
+  --color-red: #DC2626;
+  --color-blue: #2563EB;
+  --color-amber: #B45309;
+  --color-muted: #78788A;
+  --color-sidebar: #F0EFEC;
+  --color-sidebar-muted: #8E8E96;
+  --color-sidebar-hover: #1A1A1F;
+  --color-sidebar-active: #E5E4E0;
+  --color-track: #E5E4E0;
+  --color-tooltip: #1A1A1F;
+  --color-tooltip-border: #2A2A35;
+  --color-tooltip-text: #FAFAF9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Smooth theme transitions on key surfaces */
+body, nav {
+  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.2s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--color-surface); }
+::-webkit-scrollbar-thumb { background: var(--color-border-light); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-muted); }
+
+/* Trading colors */
+.text-bullish { color: var(--color-green); }
+.text-bearish { color: var(--color-red); }
+.text-neutral { color: var(--color-blue); }
+.bg-bullish { background-color: var(--color-green); }
+.bg-bearish { background-color: var(--color-red); }
+
+/* Impulse bar colors — vivid in both themes */
+.impulse-green { background-color: #22c55e; }
+.impulse-red { background-color: #ef4444; }
+.impulse-blue { background-color: #3b82f6; }
+
+/* Pulsing dot for live status */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* Dashboard stagger animation */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Subtle grid texture for dashboard — dark */
+.dashboard-grid {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Grid texture — light mode */
+:root[data-theme="light"] .dashboard-grid {
+  background-image:
+    linear-gradient(rgba(0,0,0,0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,0,0,0.022) 1px, transparent 1px);
+}
+
+/* Light mode card elevation */
+:root[data-theme="light"] .card-elevated {
+  box-shadow:
+    0 1px 3px rgba(0,0,0,0.04),
+    0 1px 2px rgba(0,0,0,0.02);
+}
