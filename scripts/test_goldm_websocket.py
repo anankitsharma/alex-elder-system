@@ -37,15 +37,16 @@ def on_tick(tick_data):
     if isinstance(tick_data, dict):
         token = tick_data.get("token", "?")
         ltp = tick_data.get("last_traded_price", tick_data.get("ltp", 0))
-        # Angel One sends prices * 100
-        if ltp > 100000:
+        # Angel One sends prices * 100 for some instruments
+        if isinstance(ltp, (int, float)) and ltp > 1_000_000:
             ltp = ltp / 100
         vol = tick_data.get("volume_trade_today", tick_data.get("volume", 0))
         last_price = ltp
         ts = datetime.now().strftime("%H:%M:%S")
-        print(f"  [{ts}] Tick #{tick_count}: token={token} LTP={ltp:.2f} Vol={vol}")
+        print(f"  [{ts}] Tick #{tick_count}: token={token} LTP={ltp} Vol={vol}")
     else:
-        print(f"  Tick #{tick_count}: {type(tick_data).__name__} (non-dict)")
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"  [{ts}] Tick #{tick_count}: {type(tick_data).__name__} len={len(tick_data) if hasattr(tick_data, '__len__') else '?'}")
 
 
 def main():
@@ -81,7 +82,6 @@ def main():
         success = angel.login_all()
         if not success:
             print("Some logins failed, trying feed-only...")
-            # Try just the feed login
             result = angel.login_feed()
             if not result.get("status"):
                 print(f"Feed login failed: {result}")
@@ -91,39 +91,42 @@ def main():
         print(f"Login error: {e}")
         return
 
-    # Step 3: Connect to WebSocket feed
-    print("\nConnecting to Angel One WebSocket feed...")
+    # Step 3: Pre-subscribe GOLDM BEFORE connecting
+    print(f"\nPre-subscribing GOLDM token={token} on MCX...")
     from app.broker.websocket_feed import market_feed
 
     market_feed.add_callback(on_tick)
+    market_feed.subscribe([token], exchange)
+    print(f"  Subscription registered (will activate on connect)")
 
-    try:
-        market_feed.connect()
-    except Exception as e:
-        print(f"WebSocket connect error: {e}")
-        return
+    # Step 4: Connect WebSocket in background thread (connect() is blocking)
+    print("\nConnecting to Angel One WebSocket feed...")
+
+    def run_feed():
+        try:
+            market_feed.connect()
+        except Exception as e:
+            print(f"WebSocket connect error: {e}")
+
+    feed_thread = threading.Thread(target=run_feed, daemon=True)
+    feed_thread.start()
 
     # Wait for connection
     print("Waiting for WebSocket connection...")
-    for i in range(10):
+    for i in range(15):
         if market_feed.is_connected:
             break
         time.sleep(1)
         print(f"  ...waiting ({i+1}s)")
 
     if not market_feed.is_connected:
-        print("ERROR: WebSocket failed to connect after 10s")
+        print("ERROR: WebSocket failed to connect after 15s")
         return
 
     print(f"Connected! is_connected={market_feed.is_connected}")
 
-    # Step 4: Subscribe to GOLDM
-    print(f"\nSubscribing to GOLDM token={token} on MCX...")
-    try:
-        market_feed.subscribe(token, exchange, mode="QUOTE")
-        print("Subscription sent!")
-    except Exception as e:
-        print(f"Subscribe error: {e}")
+    # Give subscription time to activate
+    time.sleep(2)
 
     # Step 5: Wait and collect ticks
     duration = 60
@@ -134,7 +137,7 @@ def main():
     while (time.time() - start) < duration:
         time.sleep(1)
         elapsed = int(time.time() - start)
-        if elapsed % 10 == 0 and elapsed > 0:
+        if elapsed % 15 == 0 and elapsed > 0:
             rate = tick_count / elapsed if elapsed > 0 else 0
             print(f"  --- {elapsed}s elapsed: {tick_count} ticks total ({rate:.1f}/s) ---")
 
@@ -148,10 +151,14 @@ def main():
     if tick_count == 0:
         print("\n  WARNING: No ticks received!")
         print("  Possible reasons:")
-        print("    - MCX market is closed (check hours)")
-        print("    - Feed credentials invalid")
-        print("    - Token not subscribed correctly")
+        print("    - MCX market is closed (check hours: 10AM-11:30PM IST)")
+        print("    - Feed credentials invalid or session expired")
+        print("    - Token not recognized by Angel One for this contract")
         print("    - Network/firewall blocking WebSocket")
+        print(f"\n  Debug info:")
+        print(f"    feed._subscriptions: {market_feed._subscriptions}")
+        print(f"    feed._running: {market_feed._running}")
+        print(f"    feed._last_data_time: {market_feed._last_data_time}")
 
     # Cleanup
     print("\nDisconnecting...")
