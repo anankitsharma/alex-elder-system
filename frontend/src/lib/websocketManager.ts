@@ -8,8 +8,9 @@ import { useTradingStore } from "@/store/useTradingStore";
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = BASE.replace(/^http/, "ws");
 
-const HEARTBEAT_TIMEOUT = 30_000; // 30s — mark stale if no message
+const HEARTBEAT_TIMEOUT = 45_000; // 45s — mark stale if no message (backend sends every 15s)
 const MAX_RECONNECT_DELAY = 30_000;
+const REST_POLL_AFTER = 60_000; // Start REST polling if WS down > 60s
 
 export class WebSocketManager {
   private pipelineWs: WebSocket | null = null;
@@ -17,11 +18,45 @@ export class WebSocketManager {
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private disconnectedSince: number | null = null;
   private destroyed = false;
+
+  // Track what symbol we're subscribed to for resubscribe on reconnect
+  private trackedSymbol: string | null = null;
+  private trackedExchange: string | null = null;
 
   connect() {
     this.connectPipeline();
     this.connectMarket();
+  }
+
+  // ── Symbol tracking ─────────────────────────────────────────
+
+  trackSymbol(symbol: string, exchange: string) {
+    // Untrack previous if different
+    if (this.trackedSymbol && (this.trackedSymbol !== symbol || this.trackedExchange !== exchange)) {
+      this.sendPipelineAction("stop_tracking", {
+        symbol: this.trackedSymbol,
+        exchange: this.trackedExchange,
+      });
+    }
+
+    this.trackedSymbol = symbol;
+    this.trackedExchange = exchange;
+
+    this.sendPipelineAction("start_tracking", { symbol, exchange });
+  }
+
+  untrackSymbol() {
+    if (this.trackedSymbol) {
+      this.sendPipelineAction("stop_tracking", {
+        symbol: this.trackedSymbol,
+        exchange: this.trackedExchange,
+      });
+      this.trackedSymbol = null;
+      this.trackedExchange = null;
+    }
   }
 
   // ── Pipeline WebSocket (/ws/pipeline) ──────────────────────
@@ -37,9 +72,19 @@ export class WebSocketManager {
 
     this.pipelineWs.onopen = () => {
       this.reconnectAttempts = 0;
+      this.disconnectedSince = null;
+      this.stopPolling();
       useTradingStore.getState().setPipelineWsConnected(true);
       useTradingStore.getState().setDataFreshness("live");
       this.resetHeartbeat();
+
+      // Resubscribe to tracked symbol on reconnect
+      if (this.trackedSymbol) {
+        this.sendPipelineAction("start_tracking", {
+          symbol: this.trackedSymbol,
+          exchange: this.trackedExchange,
+        });
+      }
     };
 
     this.pipelineWs.onmessage = (ev) => {
@@ -54,7 +99,11 @@ export class WebSocketManager {
 
     this.pipelineWs.onclose = () => {
       useTradingStore.getState().setPipelineWsConnected(false);
+      if (!this.disconnectedSince) {
+        this.disconnectedSince = Date.now();
+      }
       this.schedulePipelineReconnect();
+      this.maybeStartPolling();
     };
 
     this.pipelineWs.onerror = () => {
@@ -69,24 +118,30 @@ export class WebSocketManager {
     switch (type) {
       case "candle": {
         const candle = msg.candle as Record<string, unknown>;
+        const timeframe = msg.timeframe as string;
         if (candle && msg.symbol === store.symbol) {
-          store.appendCandle({
+          const candleData = {
             timestamp: candle.timestamp as string,
             open: candle.open as number,
             high: candle.high as number,
             low: candle.low as number,
             close: candle.close as number,
             volume: candle.volume as number,
-          });
-          // Auto-refresh indicators after new candle
-          setTimeout(() => store.fetchIndicators(), 500);
+          };
+          // If timeframe matches current interval, update main store
+          if (timeframe === store.interval) {
+            store.appendCandle(candleData);
+            // Auto-refresh indicators after new candle
+            setTimeout(() => store.fetchIndicators(), 500);
+          }
         }
         break;
       }
 
       case "running_bar": {
         const bar = msg.bar as Record<string, unknown>;
-        if (bar && msg.symbol === store.symbol) {
+        const timeframe = msg.timeframe as string;
+        if (bar && msg.symbol === store.symbol && timeframe === store.interval) {
           store.updateLastCandle({
             timestamp: bar.timestamp as string,
             open: bar.open as number,
@@ -101,8 +156,11 @@ export class WebSocketManager {
 
       case "indicators": {
         if (msg.symbol === store.symbol && msg.data) {
-          // Indicator update from pipeline — could set directly
-          // For now let the store's fetchIndicators handle it
+          const timeframe = msg.timeframe as string;
+          if (timeframe === store.interval) {
+            // Set indicators directly from WebSocket — no REST round-trip
+            store.setIndicators(msg.data as import("@/lib/api").IndicatorData);
+          }
         }
         break;
       }
@@ -138,12 +196,27 @@ export class WebSocketManager {
       }
 
       case "pipeline_status": {
-        // Initial status on connect
+        // Update broker connection status from pipeline
+        if (typeof msg.feed_connected === "boolean") {
+          store.setBrokerConnected(msg.feed_connected as boolean);
+        }
         break;
       }
 
-      case "heartbeat":
+      case "heartbeat": {
+        // Update broker status from heartbeat
+        if (typeof msg.feed_connected === "boolean") {
+          store.setBrokerConnected(msg.feed_connected as boolean);
+          // If feed is connected and sending data, we're live
+          const age = msg.feed_last_data_age as number;
+          if (msg.feed_connected && age >= 0 && age < 60) {
+            store.setDataFreshness("live");
+          } else if (msg.feed_connected) {
+            store.setDataFreshness("stale");
+          }
+        }
         break;
+      }
     }
   }
 
@@ -159,6 +232,41 @@ export class WebSocketManager {
     const delay = Math.min(1000 * 2 ** this.reconnectAttempts, MAX_RECONNECT_DELAY);
     this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(() => this.connectPipeline(), delay);
+  }
+
+  // ── REST polling fallback ───────────────────────────────────
+
+  private maybeStartPolling() {
+    if (this.destroyed || this.pollTimer) return;
+    // Start polling if WS has been down for > 60s
+    setTimeout(() => {
+      if (this.disconnectedSince && (Date.now() - this.disconnectedSince) > REST_POLL_AFTER) {
+        this.startPolling();
+      }
+    }, REST_POLL_AFTER);
+  }
+
+  private startPolling() {
+    if (this.pollTimer || this.destroyed) return;
+    const store = useTradingStore.getState();
+    if (!store.apiOnline) return;
+
+    this.pollTimer = setInterval(() => {
+      const s = useTradingStore.getState();
+      if (s.pipelineWsConnected) {
+        this.stopPolling();
+        return;
+      }
+      s.fetchCandles();
+      s.fetchIndicators();
+    }, 30_000);
+  }
+
+  private stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
   }
 
   // ── Market WebSocket (/ws/market) — legacy tick stream ─────
@@ -178,7 +286,6 @@ export class WebSocketManager {
 
     this.marketWs.onmessage = () => {
       // Raw ticks — existing useWebSocket hook handles this too
-      // We keep this alive for backward compatibility
     };
 
     this.marketWs.onclose = () => {
@@ -201,6 +308,7 @@ export class WebSocketManager {
 
   destroy() {
     this.destroyed = true;
+    this.stopPolling();
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.pipelineWs?.close();

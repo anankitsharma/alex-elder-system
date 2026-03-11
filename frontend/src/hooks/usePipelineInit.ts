@@ -8,6 +8,12 @@ import { useTradingStore } from "@/store/useTradingStore";
 import { WebSocketManager } from "@/lib/websocketManager";
 import { fetchHealth, fetchTradingMode } from "@/lib/api";
 
+// Module-level singleton so components can access it
+let _wsManager: WebSocketManager | null = null;
+export function getWsManager(): WebSocketManager | null {
+  return _wsManager;
+}
+
 export function usePipelineInit() {
   const [ready, setReady] = useState(false);
   const wsRef = useRef<WebSocketManager | null>(null);
@@ -17,20 +23,28 @@ export function usePipelineInit() {
     // Initialize WebSocket manager
     const ws = new WebSocketManager();
     wsRef.current = ws;
+    _wsManager = ws;
     ws.connect();
 
-    // Load initial data
+    // Load initial data via REST
     store.fetchCandles();
     store.fetchIndicators();
+
+    // Auto-track the initial symbol on the pipeline
+    const { symbol, exchange } = useTradingStore.getState();
+    ws.trackSymbol(symbol, exchange);
 
     // Load backend settings
     (async () => {
       try {
         const health = await fetchHealth();
         store.setApiOnline(true);
-        store.setDataFreshness(
-          health.status === "ok" ? "live" : "demo"
-        );
+        if (health.feed_connected) {
+          store.setBrokerConnected(true);
+          store.setDataFreshness("live");
+        } else {
+          store.setDataFreshness(health.status === "ok" ? "demo" : "disconnected");
+        }
       } catch {
         store.setApiOnline(false);
         store.setDataFreshness("disconnected");
@@ -49,8 +63,11 @@ export function usePipelineInit() {
     // Health polling (every 30s)
     const healthInterval = setInterval(async () => {
       try {
-        await fetchHealth();
+        const health = await fetchHealth();
         store.setApiOnline(true);
+        if (health.feed_connected) {
+          store.setBrokerConnected(true);
+        }
       } catch {
         store.setApiOnline(false);
         store.setDataFreshness("disconnected");
@@ -59,6 +76,7 @@ export function usePipelineInit() {
 
     return () => {
       ws.destroy();
+      _wsManager = null;
       clearInterval(healthInterval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

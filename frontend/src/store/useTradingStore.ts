@@ -47,6 +47,7 @@ interface TradingStore {
   lastCandleTime: string | null;
   fetchCandles: () => Promise<void>;
   fetchIndicators: () => Promise<void>;
+  setIndicators: (data: IndicatorData) => void;
   appendCandle: (candle: CandleData) => void;
   updateLastCandle: (candle: CandleData) => void;
 
@@ -138,6 +139,8 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
       // Indicators are non-critical
     }
   },
+
+  setIndicators: (data) => set({ indicators: data }),
 
   appendCandle: (candle) => {
     set((state) => ({

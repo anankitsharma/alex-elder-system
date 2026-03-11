@@ -41,13 +41,17 @@ export default function Dashboard() {
   const setIntervalStore = useTradingStore((s) => s.setInterval);
 
   // Initialize pipeline (WebSocket, initial data, health polling)
-  const { ready } = usePipelineInit();
+  const { ready, wsManager } = usePipelineInit();
 
   // Legacy WebSocket hook for raw ticks (used by WatchlistPanel)
   const { ticks, connected } = useWebSocket();
 
   const handleSymbolChange = (sym: string, exch: string) => {
     setAsset(sym, exch);
+    // Also tell pipeline to track the new symbol via WebSocket
+    if (wsManager) {
+      wsManager.trackSymbol(sym, exch);
+    }
   };
 
   return (

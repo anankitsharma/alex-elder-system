@@ -162,9 +162,28 @@ async def root():
 
 @app.get("/api/health")
 async def health():
+    # Broker/feed status
+    try:
+        feed_connected = market_feed.is_connected
+        feed_age = round(market_feed.last_data_age, 1)
+    except Exception:
+        feed_connected = False
+        feed_age = -1
+
+    # Pipeline status
+    try:
+        pipeline_status = await pipeline_manager.get_status()
+        active_sessions = pipeline_status.get("active_sessions", 0)
+    except Exception:
+        active_sessions = 0
+
     return {
         "status": "ok",
         "trading_mode": settings.trading_mode,
+        "feed_connected": feed_connected,
+        "feed_last_data_age": feed_age,
+        "active_sessions": active_sessions,
+        "broker_online": feed_connected or feed_age >= 0,
         "risk_per_trade": f"{settings.max_risk_per_trade_pct}%",
         "portfolio_risk_limit": f"{settings.max_portfolio_risk_pct}%",
         "min_signal_score": settings.min_signal_score,

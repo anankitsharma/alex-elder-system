@@ -248,6 +248,10 @@ export function fetchIndicators(
 export interface HealthResponse {
   status: string;
   trading_mode: string;
+  feed_connected: boolean;
+  feed_last_data_age: number;
+  active_sessions: number;
+  broker_online: boolean;
   risk_per_trade: string;
   portfolio_risk_limit: string;
   min_signal_score: number;

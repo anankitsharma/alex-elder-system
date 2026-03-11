@@ -22,6 +22,8 @@ export function PipelineStatusBar() {
   const dataFreshness = useTradingStore((s) => s.dataFreshness);
   const tradingMode = useTradingStore((s) => s.tradingMode);
   const lastCandleTime = useTradingStore((s) => s.lastCandleTime);
+  const brokerConnected = useTradingStore((s) => s.brokerConnected);
+  const pipelineWsConnected = useTradingStore((s) => s.pipelineWsConnected);
   const fetchCandles = useTradingStore((s) => s.fetchCandles);
   const fetchIndicators = useTradingStore((s) => s.fetchIndicators);
 
@@ -63,6 +65,16 @@ export function PipelineStatusBar() {
           {label}
         </span>
       </div>
+
+      {/* Broker feed status */}
+      <span className={cn("text-muted", brokerConnected ? "text-green-500/70" : "text-red-500/70")}>
+        Feed: {brokerConnected ? "ON" : "OFF"}
+      </span>
+
+      {/* Pipeline WS */}
+      <span className={cn("text-muted", pipelineWsConnected ? "text-green-500/70" : "text-red-500/70")}>
+        WS: {pipelineWsConnected ? "ON" : "OFF"}
+      </span>
 
       {/* Last candle time */}
       {ageStr && (

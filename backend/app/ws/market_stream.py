@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time as _time
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -16,6 +17,10 @@ _clients: list[WebSocket] = []
 
 # Latest tick data cache (token -> latest data)
 _tick_cache: dict[str, dict] = {}
+
+# ── Heartbeat for pipeline clients ───────────────────────────
+_heartbeat_task: asyncio.Task | None = None
+HEARTBEAT_INTERVAL = 15  # seconds
 
 
 async def broadcast_tick(data: dict):
@@ -95,6 +100,43 @@ async def market_websocket(websocket: WebSocket):
 _pipeline_clients: list[WebSocket] = []
 
 
+async def _heartbeat_loop():
+    """Send heartbeat to all pipeline clients every HEARTBEAT_INTERVAL seconds."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        if not _pipeline_clients:
+            continue
+        try:
+            from app.broker.websocket_feed import market_feed
+            feed_connected = market_feed.is_connected
+            feed_age = market_feed.last_data_age
+        except Exception:
+            feed_connected = False
+            feed_age = -1
+
+        msg = json.dumps({
+            "type": "heartbeat",
+            "ts": _time.time(),
+            "feed_connected": feed_connected,
+            "feed_last_data_age": round(feed_age, 1),
+        })
+        disconnected = []
+        for ws in _pipeline_clients:
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                disconnected.append(ws)
+        for ws in disconnected:
+            _pipeline_clients.remove(ws)
+
+
+def _ensure_heartbeat():
+    """Start heartbeat task if not already running."""
+    global _heartbeat_task
+    if _heartbeat_task is None or _heartbeat_task.done():
+        _heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+
 async def broadcast_pipeline_event(event: dict):
     """Broadcast a structured pipeline event to all connected pipeline clients."""
     if not _pipeline_clients:
@@ -121,12 +163,22 @@ async def pipeline_websocket(websocket: WebSocket):
     """
     await websocket.accept()
     _pipeline_clients.append(websocket)
+    _ensure_heartbeat()
     logger.info("Pipeline WS client connected (total: {})", len(_pipeline_clients))
 
     try:
         # Send current pipeline status on connect
         from app.pipeline import pipeline_manager
         status = await pipeline_manager.get_status()
+
+        # Also include broker/feed status
+        try:
+            from app.broker.websocket_feed import market_feed
+            status["feed_connected"] = market_feed.is_connected
+            status["feed_last_data_age"] = round(market_feed.last_data_age, 1)
+        except Exception:
+            status["feed_connected"] = False
+
         await websocket.send_text(json.dumps({
             "type": "pipeline_status",
             **status,
@@ -144,6 +196,17 @@ async def pipeline_websocket(websocket: WebSocket):
                     exchange = request.get("exchange", "NSE")
                     try:
                         await pipeline_manager.start_tracking(symbol, exchange)
+                        # Also subscribe on feed
+                        try:
+                            from app.broker.websocket_feed import market_feed
+                            from app.broker.instruments import lookup_token, download_scrip_master
+                            scrip_df = await download_scrip_master()
+                            token = lookup_token(scrip_df, symbol, exchange)
+                            if token and market_feed.is_connected:
+                                market_feed.subscribe([token], exchange)
+                                logger.info("Feed subscribed: {}:{} token={}", symbol, exchange, token)
+                        except Exception as e:
+                            logger.warning("Feed subscribe failed: {}", e)
                     except Exception as e:
                         await websocket.send_text(json.dumps({
                             "type": "error",

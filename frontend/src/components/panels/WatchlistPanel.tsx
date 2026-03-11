@@ -19,6 +19,7 @@ interface WatchItem {
 
 const DEFAULT_WATCHLIST: WatchItem[] = [
   { symbol: "NIFTY", exchange: "NFO", token: "51714" },
+  { symbol: "GOLDM", exchange: "MCX", token: "" },
   { symbol: "RELIANCE", exchange: "NSE", token: "2885" },
   { symbol: "HDFCBANK", exchange: "NSE", token: "1333" },
   { symbol: "INFY", exchange: "NSE", token: "1594" },
