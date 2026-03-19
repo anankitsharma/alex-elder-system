@@ -36,6 +36,7 @@ class MarketFeed:
         self._reconnect_attempts = 0
         self._last_data_time: float = 0
         self._reconnect_thread: threading.Thread | None = None
+        self._tick_count: int = 0
 
     def add_callback(self, callback: Callable):
         """Register a callback for incoming tick data."""
@@ -45,6 +46,15 @@ class MarketFeed:
         """Called when data is received from WebSocket."""
         self._last_data_time = time.time()
         self._reconnect_attempts = 0  # Reset on successful data
+
+        # SmartWebSocketV2 sends data as dict with token, ltp, etc.
+        # Log first few ticks for debugging
+        if self._tick_count < 3:
+            logger.info("Feed tick #{}: type={} keys={}", self._tick_count,
+                        type(message).__name__,
+                        list(message.keys())[:8] if isinstance(message, dict) else str(message)[:100])
+        self._tick_count += 1
+
         for cb in self._callbacks:
             try:
                 cb(message)
@@ -168,9 +178,9 @@ class MarketFeed:
 
     @property
     def last_data_age(self) -> float:
-        """Seconds since last data received. 0 if never received."""
+        """Seconds since last data received. -1 if never received."""
         if self._last_data_time == 0:
-            return 0
+            return -1
         return time.time() - self._last_data_time
 
 

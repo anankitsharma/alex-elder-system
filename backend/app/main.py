@@ -105,6 +105,29 @@ async def lifespan(app: FastAPI):
             feed_thread = threading.Thread(target=market_feed.connect, daemon=True)
             feed_thread.start()
             logger.info("Market feed WebSocket starting in background thread")
+
+            # Auto-start default pipeline and subscribe on feed after a delay
+            # (feed needs time to connect before we can subscribe)
+            async def _auto_start_pipeline():
+                await asyncio.sleep(5)  # Wait for feed to connect
+                try:
+                    from app.broker.instruments import download_scrip_master, lookup_token
+                    scrip_df = await download_scrip_master()
+
+                    # Start NIFTY pipeline and subscribe on feed
+                    for sym, exch in [("NIFTY", "NFO")]:
+                        try:
+                            session = await pipeline_manager.start_tracking(sym, exch)
+                            token = lookup_token(scrip_df, sym, exch)
+                            if token and market_feed.is_connected:
+                                market_feed.subscribe([token], exch)
+                                logger.info("Auto-subscribed {}:{} token={} on feed", sym, exch, token)
+                        except Exception as e:
+                            logger.warning("Auto-start {} failed: {}", sym, e)
+                except Exception as e:
+                    logger.warning("Auto pipeline start failed: {}", e)
+
+            asyncio.create_task(_auto_start_pipeline())
         else:
             logger.warning("Some Angel One logins failed — running in offline mode")
     except asyncio.TimeoutError:
