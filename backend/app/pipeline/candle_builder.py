@@ -82,9 +82,11 @@ class CandleBuilder:
         Returns:
             Completed bar dict if a bar closed, else None.
         """
-        ltp = float(tick.get("last_traded_price", 0) or tick.get("ltp", 0))
-        if ltp <= 0:
+        raw_ltp = float(tick.get("last_traded_price", 0) or tick.get("ltp", 0))
+        if raw_ltp <= 0:
             return None
+        # SmartWebSocketV2 sends prices in paise (divide by 100 for rupees)
+        ltp = raw_ltp / 100 if raw_ltp > 100000 else raw_ltp
 
         # Parse timestamp
         raw_ts = tick.get("timestamp") or tick.get("exchange_timestamp")
@@ -95,7 +97,12 @@ class CandleBuilder:
                 except ValueError:
                     now = datetime.now(IST)
             elif isinstance(raw_ts, (int, float)):
-                now = datetime.fromtimestamp(raw_ts, tz=IST)
+                # SmartWebSocketV2 may send epoch in seconds or milliseconds
+                ts_val = raw_ts / 1000 if raw_ts > 1e12 else raw_ts
+                try:
+                    now = datetime.fromtimestamp(ts_val, tz=IST)
+                except (OSError, ValueError):
+                    now = datetime.now(IST)
             else:
                 now = datetime.now(IST)
         else:

@@ -22,7 +22,7 @@ from app.config import settings
 from app.database import init_db
 from app.broker.angel_client import angel
 from app.broker.websocket_feed import market_feed
-from app.ws.market_stream import on_tick_received, broadcast_pipeline_event, set_main_loop, start_tick_poller
+from app.ws.market_stream import on_tick_received, broadcast_pipeline_event, set_main_loop, _ensure_heartbeat
 from app.pipeline import pipeline_manager
 
 # Import routers
@@ -108,8 +108,8 @@ async def lifespan(app: FastAPI):
         if success:
             logger.info("All Angel One API sessions active")
             market_feed.add_callback(on_tick_received)
-            # Pipeline routing is handled by the tick poller (avoids cross-thread async issues)
-            start_tick_poller()
+            # Start heartbeat/tick processor loop (handles pipeline routing + heartbeats)
+            _ensure_heartbeat()
             # Start WebSocket feed in background thread (connect() is blocking)
             import threading
             feed_thread = threading.Thread(target=market_feed.connect, daemon=True)

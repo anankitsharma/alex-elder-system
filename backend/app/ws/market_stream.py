@@ -22,25 +22,9 @@ def set_main_loop(loop: asyncio.AbstractEventLoop):
     global _main_loop
     _main_loop = loop
 
-async def _tick_poller():
-    """Async task that polls the tick queue and broadcasts + routes ticks."""
-    from app.pipeline import pipeline_manager
-    while True:
-        if _tick_queue:
-            # Drain all queued ticks
-            batch = list(_tick_queue)
-            _tick_queue.clear()
-            for data in batch:
-                await broadcast_tick(data)
-                # Route to pipeline
-                pipeline_manager.on_tick(data)
-        await asyncio.sleep(0.05)  # 50ms poll = up to 20 batches/sec
-
 def start_tick_poller():
-    """Start the async tick polling task."""
-    global _tick_poller_task
-    if _tick_poller_task is None or _tick_poller_task.done():
-        _tick_poller_task = asyncio.create_task(_tick_poller())
+    """No-op — tick processing is now handled by _heartbeat_loop."""
+    pass
 
 # ── Raw tick stream (/ws/market) ─────────────────────────────
 
@@ -128,33 +112,70 @@ _pipeline_clients: list[WebSocket] = []
 
 
 async def _heartbeat_loop():
-    """Send heartbeat to all pipeline clients every HEARTBEAT_INTERVAL seconds."""
-    while True:
-        await asyncio.sleep(HEARTBEAT_INTERVAL)
-        if not _pipeline_clients:
-            continue
-        try:
-            from app.broker.websocket_feed import market_feed
-            feed_connected = market_feed.is_connected
-            feed_age = market_feed.last_data_age
-        except Exception:
-            feed_connected = False
-            feed_age = -1
+    """Combined tick processor + heartbeat sender.
 
-        msg = json.dumps({
-            "type": "heartbeat",
-            "ts": _time.time(),
-            "feed_connected": feed_connected,
-            "feed_last_data_age": round(feed_age, 1),
-        })
-        disconnected = []
-        for ws in _pipeline_clients:
+    Polls tick queue every 50ms for live data routing.
+    Sends heartbeat to pipeline clients every HEARTBEAT_INTERVAL.
+    """
+    from app.pipeline import pipeline_manager
+    last_heartbeat = 0.0
+
+    while True:
+        # ── Process tick queue (every 50ms) ──
+        if _tick_queue:
+            batch = list(_tick_queue)
+            _tick_queue.clear()
+            for data in batch:
+                await broadcast_tick(data)
+                # Route tick to pipeline session
+                token = str(data.get("token", ""))
+                key = pipeline_manager._token_map.get(token)
+                if key and key in pipeline_manager._sessions:
+                    session = pipeline_manager._sessions[key]
+                    if session.active:
+                        # Feed tick to candle builders
+                        for tf, builder in session.candle_builders.items():
+                            completed = builder.on_tick(data)
+                            if completed:
+                                await session._on_new_candle(tf, completed)
+                        # Broadcast running bars
+                        for tf, builder in session.candle_builders.items():
+                            bar = builder.running_bar
+                            if bar and session._broadcast:
+                                await session._broadcast_event("running_bar", {
+                                    "symbol": session.symbol,
+                                    "timeframe": tf,
+                                    "bar": bar,
+                                })
+
+        # ── Heartbeat (every HEARTBEAT_INTERVAL) ──
+        now = _time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL and _pipeline_clients:
+            last_heartbeat = now
             try:
-                await ws.send_text(msg)
+                from app.broker.websocket_feed import market_feed
+                feed_connected = market_feed.is_connected
+                feed_age = market_feed.last_data_age
             except Exception:
-                disconnected.append(ws)
-        for ws in disconnected:
-            _pipeline_clients.remove(ws)
+                feed_connected = False
+                feed_age = -1
+
+            msg = json.dumps({
+                "type": "heartbeat",
+                "ts": now,
+                "feed_connected": feed_connected,
+                "feed_last_data_age": round(feed_age, 1),
+            })
+            disconnected = []
+            for ws in _pipeline_clients:
+                try:
+                    await ws.send_text(msg)
+                except Exception:
+                    disconnected.append(ws)
+            for ws in disconnected:
+                _pipeline_clients.remove(ws)
+
+        await asyncio.sleep(0.05)  # 50ms poll cycle
 
 
 def _ensure_heartbeat():
