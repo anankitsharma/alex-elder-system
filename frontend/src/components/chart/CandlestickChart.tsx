@@ -214,69 +214,26 @@ export function CandlestickChart({
       refs.volume.setData(volData);
     }
 
+    // Include ALL timestamps for overlays so logical indices match
+    const lineData = (arr?: (number | null)[]): LineData[] => {
+      if (!arr) return [];
+      return candles.map((c, i) => ({
+        time: toTime(c.timestamp),
+        value: (arr[i] ?? 0) as number,
+      }));
+    };
+
     // EMA-13 overlay
-    if (refs.ema13 && indicators?.ema13) {
-      const emaData: LineData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        if (indicators.ema13[i] != null) {
-          emaData.push({
-            time: toTime(candles[i].timestamp),
-            value: indicators.ema13[i] as number,
-          });
-        }
-      }
-      refs.ema13.setData(emaData);
-    } else if (refs.ema13) {
-      refs.ema13.setData([]);
-    }
+    if (refs.ema13) refs.ema13.setData(lineData(indicators?.ema13));
 
     // EMA-22 overlay
-    if (refs.ema22 && indicators?.ema22) {
-      const emaData: LineData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        if (indicators.ema22[i] != null) {
-          emaData.push({
-            time: toTime(candles[i].timestamp),
-            value: indicators.ema22[i] as number,
-          });
-        }
-      }
-      refs.ema22.setData(emaData);
-    } else if (refs.ema22) {
-      refs.ema22.setData([]);
-    }
+    if (refs.ema22) refs.ema22.setData(lineData(indicators?.ema22));
 
     // SafeZone support (long stop)
-    if (refs.szLong && indicators?.safezone_long) {
-      const szData: LineData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        if (indicators.safezone_long[i] != null) {
-          szData.push({
-            time: toTime(candles[i].timestamp),
-            value: indicators.safezone_long[i] as number,
-          });
-        }
-      }
-      refs.szLong.setData(szData);
-    } else if (refs.szLong) {
-      refs.szLong.setData([]);
-    }
+    if (refs.szLong) refs.szLong.setData(lineData(indicators?.safezone_long));
 
     // SafeZone resistance (short stop)
-    if (refs.szShort && indicators?.safezone_short) {
-      const szData: LineData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        if (indicators.safezone_short[i] != null) {
-          szData.push({
-            time: toTime(candles[i].timestamp),
-            value: indicators.safezone_short[i] as number,
-          });
-        }
-      }
-      refs.szShort.setData(szData);
-    } else if (refs.szShort) {
-      refs.szShort.setData([]);
-    }
+    if (refs.szShort) refs.szShort.setData(lineData(indicators?.safezone_short));
 
     // Only fit content on initial load / symbol change, not every tick
     if (candles.length !== prevCountRef.current) {

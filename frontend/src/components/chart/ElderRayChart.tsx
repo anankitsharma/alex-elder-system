@@ -104,30 +104,26 @@ export default function ElderRayChart({
     if (!refs.bull || !refs.bear) return;
     if (!timestamps.length) return;
 
-    const bullData: HistogramData[] = [];
-    const bearData: HistogramData[] = [];
+    // Include ALL timestamps so logical indices match candle charts
+    const T = "rgba(0,0,0,0)";
 
-    for (let i = 0; i < timestamps.length; i++) {
-      const time = toTime(timestamps[i]);
+    const bullData: HistogramData[] = timestamps.map((ts, i) => {
       const bp = bullPower[i];
+      return {
+        time: toTime(ts),
+        value: bp ?? 0,
+        color: bp == null ? T : bp >= 0 ? "#26a69a" : "#26a69a80",
+      };
+    });
+
+    const bearData: HistogramData[] = timestamps.map((ts, i) => {
       const brp = bearPower[i];
-
-      if (bp != null) {
-        bullData.push({
-          time,
-          value: bp,
-          color: bp >= 0 ? "#26a69a" : "#26a69a80",
-        });
-      }
-
-      if (brp != null) {
-        bearData.push({
-          time,
-          value: brp,
-          color: brp <= 0 ? "#ef5350" : "#ef535080",
-        });
-      }
-    }
+      return {
+        time: toTime(ts),
+        value: brp ?? 0,
+        color: brp == null ? T : brp <= 0 ? "#ef5350" : "#ef535080",
+      };
+    });
 
     refs.bull.setData(bullData);
     refs.bear.setData(bearData);

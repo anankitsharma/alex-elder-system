@@ -109,33 +109,28 @@ export default function ForceIndexChart({
     const refs = seriesRefs.current;
     if (!timestamps.length) return;
 
+    // Include ALL timestamps so logical indices match candle charts
+    const T = "rgba(0,0,0,0)";
+
     // FI-2 histogram
     if (refs.fi2 && forceIndex2) {
-      const data: HistogramData[] = [];
-      for (let i = 0; i < timestamps.length; i++) {
+      const data: HistogramData[] = timestamps.map((ts, i) => {
         const val = forceIndex2[i];
-        if (val != null) {
-          data.push({
-            time: toTime(timestamps[i]),
-            value: val,
-            color: val >= 0 ? "#26a69a80" : "#ef535080",
-          });
-        }
-      }
+        return {
+          time: toTime(ts),
+          value: val ?? 0,
+          color: val == null ? T : val >= 0 ? "#26a69a80" : "#ef535080",
+        };
+      });
       refs.fi2.setData(data);
     }
 
     // FI-13 line
     if (refs.fi13 && forceIndex13) {
-      const data: LineData[] = [];
-      for (let i = 0; i < timestamps.length; i++) {
-        if (forceIndex13[i] != null) {
-          data.push({
-            time: toTime(timestamps[i]),
-            value: forceIndex13[i] as number,
-          });
-        }
-      }
+      const data: LineData[] = timestamps.map((ts, i) => ({
+        time: toTime(ts),
+        value: (forceIndex13[i] ?? 0) as number,
+      }));
       refs.fi13.setData(data);
     }
 

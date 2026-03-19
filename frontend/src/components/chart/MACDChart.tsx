@@ -109,12 +109,14 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
     const refs = seriesRefs.current;
     if (!refs.histogram || !indicators || candles.length === 0) return;
 
-    // Histogram bars with 4-color Pine Script logic
-    const histData: HistogramData[] = [];
-    for (let i = 0; i < candles.length; i++) {
-      const val = indicators.macd_histogram[i];
-      if (val == null) continue;
+    // Include ALL timestamps so logical indices match candle charts
+    const T = "rgba(0,0,0,0)";
 
+    // Histogram bars with 4-color Pine Script logic
+    const histData: HistogramData[] = candles.map((c, i) => {
+      const val = indicators.macd_histogram[i];
+      const time = toTime(c.timestamp);
+      if (val == null) return { time, value: 0, color: T };
       const prev = i > 0 ? indicators.macd_histogram[i - 1] : null;
       let color: string;
       if (val >= 0) {
@@ -122,33 +124,22 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
       } else {
         color = prev != null && val > prev ? "#FFCDD2" : "#FF5252";
       }
-
-      histData.push({ time: toTime(candles[i].timestamp), value: val, color });
-    }
+      return { time, value: val, color };
+    });
     refs.histogram.setData(histData);
 
     // MACD line
-    const macdData: LineData[] = [];
-    for (let i = 0; i < candles.length; i++) {
-      if (indicators.macd_line[i] != null) {
-        macdData.push({
-          time: toTime(candles[i].timestamp),
-          value: indicators.macd_line[i] as number,
-        });
-      }
-    }
+    const macdData: LineData[] = candles.map((c, i) => ({
+      time: toTime(c.timestamp),
+      value: (indicators.macd_line[i] ?? 0) as number,
+    }));
     refs.macdLine.setData(macdData);
 
     // Signal line
-    const sigData: LineData[] = [];
-    for (let i = 0; i < candles.length; i++) {
-      if (indicators.macd_signal[i] != null) {
-        sigData.push({
-          time: toTime(candles[i].timestamp),
-          value: indicators.macd_signal[i] as number,
-        });
-      }
-    }
+    const sigData: LineData[] = candles.map((c, i) => ({
+      time: toTime(c.timestamp),
+      value: (indicators.macd_signal[i] ?? 0) as number,
+    }));
     refs.signal.setData(sigData);
 
     chartRef.current?.timeScale().fitContent();
