@@ -194,11 +194,15 @@ export function CandlestickChart({
       refs.volume.setData(volData);
     }
 
+    // Overlays are on the SAME chart as candles — skip nulls (don't pad with 0,
+    // which would pull the y-axis scale down to zero and squish the candles)
     const lineData = (arr?: (number | null)[]): LineData[] => {
       if (!arr) return [];
-      return candles.map((c, i) => ({
-        time: toTime(c.timestamp), value: (arr[i] ?? 0) as number,
-      }));
+      const out: LineData[] = [];
+      for (let i = 0; i < candles.length && i < arr.length; i++) {
+        if (arr[i] != null) out.push({ time: toTime(candles[i].timestamp), value: arr[i] as number });
+      }
+      return out;
     };
 
     if (refs.ema13) refs.ema13.setData(lineData(indicators?.ema13));
