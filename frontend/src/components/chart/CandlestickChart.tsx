@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -27,15 +27,26 @@ interface CandlestickChartProps {
   showVolume?: boolean;
 }
 
+interface OHLCVLegend {
+  o: number; h: number; l: number; c: number; v: number;
+  change: number; pct: number;
+}
+
 function toTime(ts: string): Time {
   return (new Date(ts).getTime() / 1000) as Time;
 }
 
-// Map impulse colors to hex
 const IMPULSE_MAP: Record<string, { up: string; down: string; wickUp: string; wickDown: string }> = {
   green: { up: "#22c55e", down: "#22c55e", wickUp: "#22c55e88", wickDown: "#22c55e88" },
   red: { up: "#ef4444", down: "#ef4444", wickUp: "#ef444488", wickDown: "#ef444488" },
   blue: { up: "#6366f1", down: "#6366f1", wickUp: "#6366f188", wickDown: "#6366f188" },
+};
+
+const fmt = (n: number) => {
+  if (n >= 1e7) return (n / 1e7).toFixed(2) + "Cr";
+  if (n >= 1e5) return (n / 1e5).toFixed(2) + "L";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+  return n.toFixed(0);
 };
 
 export function CandlestickChart({
@@ -51,8 +62,9 @@ export function CandlestickChart({
   const priceLineRef = useRef<IPriceLine | null>(null);
   const prevCountRef = useRef(0);
   const { theme } = useTheme();
+  const [legend, setLegend] = useState<OHLCVLegend | null>(null);
 
-  // Create chart once
+  // Create chart
   useEffect(() => {
     if (!containerRef.current) return;
     const ct = getChartTheme();
@@ -71,7 +83,7 @@ export function CandlestickChart({
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: ct.accent + "80", width: 1, style: 2 },
+        vertLine: { color: ct.accent + "80", width: 1, style: 2, labelVisible: false },
         horzLine: { color: ct.accent + "80", width: 1, style: 2 },
       },
       rightPriceScale: {
@@ -85,22 +97,20 @@ export function CandlestickChart({
       },
     });
 
-    // Candlestick series
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e88",
-      wickDownColor: "#ef444488",
+      upColor: "#22c55e", downColor: "#ef4444",
+      borderUpColor: "#22c55e", borderDownColor: "#ef4444",
+      wickUpColor: "#22c55e88", wickDownColor: "#ef444488",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     seriesRefs.current.candles = candleSeries;
 
-    // Volume
     if (showVolume) {
       const volumeSeries = chart.addSeries(HistogramSeries, {
         priceFormat: { type: "volume" },
         priceScaleId: "volume",
+        lastValueVisible: false,
       });
       chart.priceScale("volume").applyOptions({
         scaleMargins: { top: 0.8, bottom: 0 },
@@ -108,50 +118,40 @@ export function CandlestickChart({
       seriesRefs.current.volume = volumeSeries;
     }
 
-    // EMA-13 line
-    const ema13Series = chart.addSeries(LineSeries, {
-      color: "#f59e0b",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
+    seriesRefs.current.ema13 = chart.addSeries(LineSeries, {
+      color: "#f59e0b", lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
     });
-    seriesRefs.current.ema13 = ema13Series;
+    seriesRefs.current.ema22 = chart.addSeries(LineSeries, {
+      color: "#8b5cf6", lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    });
+    seriesRefs.current.szLong = chart.addSeries(LineSeries, {
+      color: "#22c55e60", lineWidth: 1, lineStyle: LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    seriesRefs.current.szShort = chart.addSeries(LineSeries, {
+      color: "#ef444460", lineWidth: 1, lineStyle: LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: false,
+    });
 
-    // EMA-22 line
-    const ema22Series = chart.addSeries(LineSeries, {
-      color: "#8b5cf6",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
+    // OHLCV legend on crosshair
+    const volSeries = seriesRefs.current.volume;
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time || !param.seriesData) { setLegend(null); return; }
+      const cd = param.seriesData.get(candleSeries) as CandlestickData | undefined;
+      const vd = volSeries ? param.seriesData.get(volSeries) as HistogramData | undefined : undefined;
+      if (cd) {
+        const change = cd.close - cd.open;
+        setLegend({
+          o: cd.open, h: cd.high, l: cd.low, c: cd.close,
+          v: vd?.value ?? 0, change, pct: cd.open ? (change / cd.open) * 100 : 0,
+        });
+      }
     });
-    seriesRefs.current.ema22 = ema22Series;
-
-    // SafeZone long (support) — green dashed
-    const szLongSeries = chart.addSeries(LineSeries, {
-      color: "#22c55e60",
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    seriesRefs.current.szLong = szLongSeries;
-
-    // SafeZone short (resistance) — red dashed
-    const szShortSeries = chart.addSeries(LineSeries, {
-      color: "#ef444460",
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    seriesRefs.current.szShort = szShortSeries;
 
     chartRef.current = chart;
 
     const handleResize = () => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
-      }
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
     };
     window.addEventListener("resize", handleResize);
 
@@ -163,108 +163,92 @@ export function CandlestickChart({
     };
   }, [height, showVolume, theme]);
 
-  // Update data when candles or indicators change
+  // Update data
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.candles || candles.length === 0) return;
 
-    // Build candle data with optional impulse coloring
     const hasImpulse = indicators?.impulse_color && indicators.impulse_color.length > 0;
 
     const candleData: CandlestickData[] = candles.map((c, i) => {
       const base: CandlestickData = {
-        time: toTime(c.timestamp),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
+        time: toTime(c.timestamp), open: c.open, high: c.high, low: c.low, close: c.close,
       };
-
-      // Color candles by impulse system
       if (hasImpulse && indicators?.impulse_color[i]) {
-        const impulseColor = indicators.impulse_color[i] as string;
-        const colors = IMPULSE_MAP[impulseColor];
-        if (colors) {
-          return {
-            ...base,
-            color: colors.up,
-            borderColor: colors.up,
-            wickColor: colors.wickUp,
-          };
-        }
+        const colors = IMPULSE_MAP[indicators.impulse_color[i] as string];
+        if (colors) return { ...base, color: colors.up, borderColor: colors.up, wickColor: colors.wickUp };
       }
-
       return base;
     });
-
     refs.candles.setData(candleData);
 
-    // Volume (colored by impulse if available)
     if (refs.volume) {
       const volData: HistogramData[] = candles.map((c, i) => {
         let color = c.close >= c.open ? "#22c55e40" : "#ef444440";
         if (hasImpulse && indicators?.impulse_color[i]) {
           const ic = indicators.impulse_color[i];
-          if (ic === "green") color = "#22c55e40";
-          else if (ic === "red") color = "#ef444440";
-          else color = "#6366f130";
+          color = ic === "green" ? "#22c55e40" : ic === "red" ? "#ef444440" : "#6366f130";
         }
         return { time: toTime(c.timestamp), value: c.volume, color };
       });
       refs.volume.setData(volData);
     }
 
-    // Include ALL timestamps for overlays so logical indices match
     const lineData = (arr?: (number | null)[]): LineData[] => {
       if (!arr) return [];
       return candles.map((c, i) => ({
-        time: toTime(c.timestamp),
-        value: (arr[i] ?? 0) as number,
+        time: toTime(c.timestamp), value: (arr[i] ?? 0) as number,
       }));
     };
 
-    // EMA-13 overlay
     if (refs.ema13) refs.ema13.setData(lineData(indicators?.ema13));
-
-    // EMA-22 overlay
     if (refs.ema22) refs.ema22.setData(lineData(indicators?.ema22));
-
-    // SafeZone support (long stop)
     if (refs.szLong) refs.szLong.setData(lineData(indicators?.safezone_long));
-
-    // SafeZone resistance (short stop)
     if (refs.szShort) refs.szShort.setData(lineData(indicators?.safezone_short));
 
-    // Only fit content on initial load / symbol change, not every tick
     if (candles.length !== prevCountRef.current) {
       chartRef.current?.timeScale().fitContent();
       prevCountRef.current = candles.length;
     }
 
-    // LTP price line on last candle
+    // LTP price line
     if (candles.length > 0 && refs.candles) {
       const lastClose = candles[candles.length - 1].close;
       try {
-        if (priceLineRef.current) {
-          refs.candles.removePriceLine(priceLineRef.current);
-        }
+        if (priceLineRef.current) refs.candles.removePriceLine(priceLineRef.current);
         priceLineRef.current = refs.candles.createPriceLine({
-          price: lastClose,
-          color: "#2962FF",
-          lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: "",
+          price: lastClose, color: "#2962FF", lineWidth: 1,
+          lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "",
         });
-      } catch { /* series may be disposed */ }
+      } catch { /* disposed */ }
     }
   }, [candles, indicators, height, showVolume]);
 
+  // Display legend
+  const d = legend ?? (candles.length > 0 ? (() => {
+    const last = candles[candles.length - 1];
+    const ch = last.close - last.open;
+    return { o: last.open, h: last.high, l: last.low, c: last.close, v: last.volume, change: ch, pct: last.open ? (ch / last.open) * 100 : 0 };
+  })() : null);
+  const isUp = d ? d.c >= d.o : true;
+  const clr = isUp ? "#22c55e" : "#ef4444";
+
   return (
-    <div
-      ref={containerRef}
-      className="w-full rounded border border-border overflow-hidden"
-      style={{ height }}
-    />
+    <div className="relative w-full rounded border border-border overflow-hidden" style={{ height }}>
+      {/* TradingView-style OHLCV legend */}
+      {d && (
+        <div className="absolute top-0.5 left-2 z-10 flex items-center gap-1.5 text-[9px] font-mono pointer-events-none select-none">
+          <span className="text-muted">O</span><span style={{ color: clr }}>{d.o.toFixed(2)}</span>
+          <span className="text-muted">H</span><span style={{ color: clr }}>{d.h.toFixed(2)}</span>
+          <span className="text-muted">L</span><span style={{ color: clr }}>{d.l.toFixed(2)}</span>
+          <span className="text-muted">C</span><span style={{ color: clr }}>{d.c.toFixed(2)}</span>
+          <span style={{ color: clr, fontSize: "8px" }}>
+            {d.change >= 0 ? "+" : ""}{d.change.toFixed(2)} ({d.pct >= 0 ? "+" : ""}{d.pct.toFixed(2)}%)
+          </span>
+          {d.v > 0 && <span className="text-muted">{fmt(d.v)}</span>}
+        </div>
+      )}
+      <div ref={containerRef} className="absolute inset-0" />
+    </div>
   );
 }

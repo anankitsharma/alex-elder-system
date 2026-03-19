@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   HistogramSeries,
@@ -34,6 +34,8 @@ export default function ElderRayChart({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesRefs = useRef<Record<string, any>>({});
   const { theme } = useTheme();
+  const [legendBull, setLegendBull] = useState<number | null>(null);
+  const [legendBear, setLegendBear] = useState<number | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -65,28 +67,35 @@ export default function ElderRayChart({
       },
     });
 
-    // Bull Power (green histogram)
     const bullSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "price", precision: 2 },
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: false, lastValueVisible: false,
     });
     seriesRefs.current.bull = bullSeries;
 
-    // Bear Power (red histogram)
     const bearSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "price", precision: 2 },
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: false, lastValueVisible: false,
     });
     seriesRefs.current.bear = bearSeries;
+
+    // Legend on crosshair
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time || !param.seriesData) {
+        setLegendBull(null);
+        setLegendBear(null);
+        return;
+      }
+      const bd = param.seriesData.get(bullSeries) as HistogramData | undefined;
+      const brd = param.seriesData.get(bearSeries) as HistogramData | undefined;
+      setLegendBull(bd?.value ?? null);
+      setLegendBear(brd?.value ?? null);
+    });
 
     chartRef.current = chart;
 
     const handleResize = () => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
-      }
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
     };
     window.addEventListener("resize", handleResize);
 
@@ -98,20 +107,17 @@ export default function ElderRayChart({
     };
   }, [height, theme]);
 
-  // Update data
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.bull || !refs.bear) return;
     if (!timestamps.length) return;
 
-    // Include ALL timestamps so logical indices match candle charts
     const T = "rgba(0,0,0,0)";
 
     const bullData: HistogramData[] = timestamps.map((ts, i) => {
       const bp = bullPower[i];
       return {
-        time: toTime(ts),
-        value: bp ?? 0,
+        time: toTime(ts), value: bp ?? 0,
         color: bp == null ? T : bp >= 0 ? "#26a69a" : "#26a69a80",
       };
     });
@@ -119,8 +125,7 @@ export default function ElderRayChart({
     const bearData: HistogramData[] = timestamps.map((ts, i) => {
       const brp = bearPower[i];
       return {
-        time: toTime(ts),
-        value: brp ?? 0,
+        time: toTime(ts), value: brp ?? 0,
         color: brp == null ? T : brp <= 0 ? "#ef5350" : "#ef535080",
       };
     });
@@ -132,12 +137,17 @@ export default function ElderRayChart({
 
   if (!bullPower?.some((v) => v != null)) return null;
 
+  // Legend values
+  const bull = legendBull ?? bullPower.filter(v => v != null).slice(-1)[0] ?? 0;
+  const bear = legendBear ?? bearPower.filter(v => v != null).slice(-1)[0] ?? 0;
+
   return (
     <div className="relative">
-      <span className="absolute top-0.5 left-2 z-10 text-[9px] text-muted font-mono">
-        Elder-Ray(13) &nbsp;
-        <span className="text-[#26a69a]">Bull</span> / <span className="text-[#ef5350]">Bear</span>
-      </span>
+      <div className="absolute top-0.5 left-2 z-10 flex items-center gap-2 text-[9px] font-mono pointer-events-none select-none">
+        <span className="text-muted">Elder-Ray(13)</span>
+        <span style={{ color: "#26a69a" }}>Bull {bull.toFixed(2)}</span>
+        <span style={{ color: "#ef5350" }}>Bear {bear.toFixed(2)}</span>
+      </div>
       <div
         ref={containerRef}
         className="w-full border-t border-border overflow-hidden"

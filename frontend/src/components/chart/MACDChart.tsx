@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   HistogramSeries,
@@ -21,6 +21,8 @@ interface MACDChartProps {
   height?: number;
 }
 
+interface MACDLegend { macd: number; signal: number; hist: number; }
+
 function toTime(ts: string): Time {
   return (new Date(ts).getTime() / 1000) as Time;
 }
@@ -31,6 +33,7 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesRefs = useRef<Record<string, any>>({});
   const { theme } = useTheme();
+  const [legend, setLegend] = useState<MACDLegend | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -62,38 +65,43 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
       },
     });
 
-    // MACD histogram
     const histSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "price", precision: 2 },
-      priceLineVisible: false,
-      lastValueVisible: false,
+      priceLineVisible: false, lastValueVisible: false,
     });
     seriesRefs.current.histogram = histSeries;
 
-    // MACD line
     const macdLineSeries = chart.addSeries(LineSeries, {
-      color: "#3b82f6",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
+      color: "#3b82f6", lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false,
     });
     seriesRefs.current.macdLine = macdLineSeries;
 
-    // Signal line
     const signalSeries = chart.addSeries(LineSeries, {
-      color: "#f97316",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
+      color: "#f97316", lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false,
     });
     seriesRefs.current.signal = signalSeries;
+
+    // Legend on crosshair
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time || !param.seriesData) { setLegend(null); return; }
+      const hd = param.seriesData.get(histSeries) as HistogramData | undefined;
+      const md = param.seriesData.get(macdLineSeries) as { value?: number } | undefined;
+      const sd = param.seriesData.get(signalSeries) as { value?: number } | undefined;
+      if (hd || md || sd) {
+        setLegend({
+          hist: hd?.value ?? 0,
+          macd: (md as any)?.value ?? 0,
+          signal: (sd as any)?.value ?? 0,
+        });
+      }
+    });
 
     chartRef.current = chart;
 
     const handleResize = () => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
-      }
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
     };
     window.addEventListener("resize", handleResize);
 
@@ -109,10 +117,7 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
     const refs = seriesRefs.current;
     if (!refs.histogram || !indicators || candles.length === 0) return;
 
-    // Include ALL timestamps so logical indices match candle charts
     const T = "rgba(0,0,0,0)";
-
-    // Histogram bars with 4-color Pine Script logic
     const histData: HistogramData[] = candles.map((c, i) => {
       const val = indicators.macd_histogram[i];
       const time = toTime(c.timestamp);
@@ -128,17 +133,13 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
     });
     refs.histogram.setData(histData);
 
-    // MACD line
     const macdData: LineData[] = candles.map((c, i) => ({
-      time: toTime(c.timestamp),
-      value: (indicators.macd_line[i] ?? 0) as number,
+      time: toTime(c.timestamp), value: (indicators.macd_line[i] ?? 0) as number,
     }));
     refs.macdLine.setData(macdData);
 
-    // Signal line
     const sigData: LineData[] = candles.map((c, i) => ({
-      time: toTime(c.timestamp),
-      value: (indicators.macd_signal[i] ?? 0) as number,
+      time: toTime(c.timestamp), value: (indicators.macd_signal[i] ?? 0) as number,
     }));
     refs.signal.setData(sigData);
 
@@ -147,11 +148,24 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
 
   if (!indicators?.macd_histogram?.some((v) => v != null)) return null;
 
+  // Legend values
+  const d = legend ?? (() => {
+    const lastIdx = indicators.macd_histogram.length - 1;
+    return {
+      hist: indicators.macd_histogram[lastIdx] ?? 0,
+      macd: indicators.macd_line?.[lastIdx] ?? 0,
+      signal: indicators.macd_signal?.[lastIdx] ?? 0,
+    };
+  })();
+
   return (
     <div className="relative">
-      <span className="absolute top-0.5 left-2 z-10 text-[9px] text-muted font-mono">
-        MACD(12,26,9)
-      </span>
+      <div className="absolute top-0.5 left-2 z-10 flex items-center gap-2 text-[9px] font-mono pointer-events-none select-none">
+        <span className="text-muted">MACD(12,26,9)</span>
+        <span style={{ color: "#3b82f6" }}>{d.macd.toFixed(2)}</span>
+        <span style={{ color: "#f97316" }}>{d.signal.toFixed(2)}</span>
+        <span style={{ color: d.hist >= 0 ? "#26A69A" : "#FF5252" }}>{d.hist.toFixed(2)}</span>
+      </div>
       <div
         ref={containerRef}
         className="w-full border-t border-border overflow-hidden"
