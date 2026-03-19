@@ -210,10 +210,13 @@ export function CandlestickChart({
     if (refs.szLong) refs.szLong.setData(lineData(indicators?.safezone_long));
     if (refs.szShort) refs.szShort.setData(lineData(indicators?.safezone_short));
 
-    if (candles.length !== prevCountRef.current) {
+    // Only fitContent on initial load (0→N) or big symbol change, not every update
+    const isInit = prevCountRef.current === 0 && candles.length > 0;
+    const isBigChange = candles.length > 0 && Math.abs(candles.length - prevCountRef.current) > 5;
+    if (isInit || isBigChange) {
       chartRef.current?.timeScale().fitContent();
-      prevCountRef.current = candles.length;
     }
+    prevCountRef.current = candles.length;
 
     // LTP price line
     if (candles.length > 0 && refs.candles) {

@@ -485,29 +485,35 @@ export default function TradingViewChart({
       ));
     }
 
-    // Sync all panes using TIME-BASED range from main chart.
-    // fitContent on main chart, then force sub-charts to same time window.
-    const mainChart = chartsRef.current[0];
-    if (mainChart) {
-      syncingRef.current = true;
-      mainChart.timeScale().fitContent();
+    // Only fitContent + sync on INITIAL load (candle count 0→N) or symbol change.
+    // Do NOT call on indicator updates or running bar changes — that would
+    // reset user's zoom/scroll position on every tick.
+    const isInitialLoad = prevCandleCountRef.current === 0 && candles.length > 0;
+    const isSymbolChange = candles.length > 0 && candles.length !== prevCandleCountRef.current
+      && Math.abs(candles.length - prevCandleCountRef.current) > 5;
 
-      const doSync = () => {
-        try {
-          const range = mainChart.timeScale().getVisibleRange();
-          if (range) {
-            chartsRef.current.forEach((c, idx) => {
-              if (idx > 0) {
-                try { c.timeScale().setVisibleRange(range); } catch { /* ok */ }
-              }
-            });
-          }
-        } catch { /* disposed */ }
-      };
+    if (isInitialLoad || isSymbolChange) {
+      const mainChart = chartsRef.current[0];
+      if (mainChart) {
+        syncingRef.current = true;
+        mainChart.timeScale().fitContent();
 
-      // Two passes with time-based sync, then unlock
-      setTimeout(doSync, 50);
-      setTimeout(() => { doSync(); syncingRef.current = false; }, 200);
+        const doSync = () => {
+          try {
+            const range = mainChart.timeScale().getVisibleRange();
+            if (range) {
+              chartsRef.current.forEach((c, idx) => {
+                if (idx > 0) {
+                  try { c.timeScale().setVisibleRange(range); } catch { /* ok */ }
+                }
+              });
+            }
+          } catch { /* disposed */ }
+        };
+
+        setTimeout(doSync, 50);
+        setTimeout(() => { doSync(); syncingRef.current = false; }, 200);
+      }
     }
     prevCandleCountRef.current = candles.length;
   }, [candles, indicators]);

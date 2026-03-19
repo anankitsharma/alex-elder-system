@@ -143,7 +143,11 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
     }));
     refs.signal.setData(sigData);
 
-    chartRef.current?.timeScale().fitContent();
+    // fitContent only once after initial data load
+    if (!(chartRef.current as any)?.__fitted) {
+      chartRef.current?.timeScale().fitContent();
+      if (chartRef.current) (chartRef.current as any).__fitted = true;
+    }
   }, [candles, indicators, height]);
 
   if (!indicators?.macd_histogram?.some((v) => v != null)) return null;

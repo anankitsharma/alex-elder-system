@@ -150,7 +150,10 @@ export default function ForceIndexChart({
       refs.fi13.setData(data);
     }
 
-    chartRef.current?.timeScale().fitContent();
+    if (!(chartRef.current as any)?.__fitted) {
+      chartRef.current?.timeScale().fitContent();
+      if (chartRef.current) (chartRef.current as any).__fitted = true;
+    }
   }, [timestamps, forceIndex2, forceIndex13, height]);
 
   const hasData = forceIndex2?.some((v) => v != null) || forceIndex13?.some((v) => v != null);

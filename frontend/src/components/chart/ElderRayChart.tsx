@@ -132,7 +132,10 @@ export default function ElderRayChart({
 
     refs.bull.setData(bullData);
     refs.bear.setData(bearData);
-    chartRef.current?.timeScale().fitContent();
+    if (!(chartRef.current as any)?.__fitted) {
+      chartRef.current?.timeScale().fitContent();
+      if (chartRef.current) (chartRef.current as any).__fitted = true;
+    }
   }, [timestamps, bullPower, bearPower, height]);
 
   if (!bullPower?.some((v) => v != null)) return null;
