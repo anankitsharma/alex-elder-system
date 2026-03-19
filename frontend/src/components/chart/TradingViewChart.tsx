@@ -13,7 +13,7 @@
  * Uses series.update() for running bars — O(1) instead of O(N) setData().
  */
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -35,6 +35,17 @@ import type { CandleData, IndicatorData } from "@/lib/api";
 import { useTheme } from "@/hooks/useTheme";
 import { getChartTheme } from "@/lib/chartTheme";
 import { useTradingStore } from "@/store/useTradingStore";
+
+/* ── OHLCV Legend data ─────────────────────────────────────────── */
+interface OHLCVData {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  change: number;
+  changePct: number;
+}
 
 /* ── props ──────────────────────────────────────────────────────── */
 
@@ -90,6 +101,7 @@ export default function TradingViewChart({
   const prevCandleCountRef = useRef(0);
   const priceLineRef = useRef<IPriceLine | null>(null);
   const { theme: currentTheme } = useTheme();
+  const [ohlcv, setOhlcv] = useState<OHLCVData | null>(null);
 
   /* ── determine which sub-panes are active ────────────────────── */
   const hasMACD = showMACD && indicators?.macd_histogram?.some((v) => v != null);
@@ -180,6 +192,8 @@ export default function TradingViewChart({
           upColor: "#22c55e", downColor: "#ef4444",
           borderUpColor: "#22c55e", borderDownColor: "#ef4444",
           wickUpColor: "#22c55e88", wickDownColor: "#ef444488",
+          lastValueVisible: false,  // Hide the default colored price label
+          priceLineVisible: false,  // Hide the default price line
         });
         seriesRef.current.candles = cs;
 
@@ -187,6 +201,7 @@ export default function TradingViewChart({
           const vol = chart.addSeries(HistogramSeries, {
             priceFormat: { type: "volume" },
             priceScaleId: "vol",
+            lastValueVisible: false,
           });
           chart.priceScale("vol").applyOptions({
             scaleMargins: { top: 0.8, bottom: 0 },
@@ -298,6 +313,31 @@ export default function TradingViewChart({
         syncingRef.current = false;
       });
     });
+
+    // OHLCV legend: track crosshair on main chart to show inline data
+    const mainChart2 = charts[0];
+    if (mainChart2 && seriesRef.current.candles) {
+      const candleSeries = seriesRef.current.candles;
+      const volSeries = seriesRef.current.volume;
+      mainChart2.subscribeCrosshairMove((param) => {
+        if (!param.time || !param.seriesData) {
+          // Reset to last candle data when cursor leaves
+          setOhlcv(null);
+          return;
+        }
+        const cd = param.seriesData.get(candleSeries) as CandlestickData | undefined;
+        const vd = volSeries ? param.seriesData.get(volSeries) as HistogramData | undefined : undefined;
+        if (cd) {
+          const change = cd.close - cd.open;
+          const changePct = cd.open !== 0 ? (change / cd.open) * 100 : 0;
+          setOhlcv({
+            open: cd.open, high: cd.high, low: cd.low, close: cd.close,
+            volume: vd?.value ?? 0,
+            change, changePct,
+          });
+        }
+      });
+    }
 
     chartsRef.current = charts;
   }, [showVolume, hasMACD, hasFI, hasER, currentTheme]);
@@ -534,10 +574,55 @@ export default function TradingViewChart({
     ? "Force Index(2,13)"
     : indicators?.force_index_2?.some((v) => v != null) ? "Force Index(2)" : "Force Index(13)";
 
+  // Compute display OHLCV — use crosshair data or fall back to last candle
+  const displayOhlcv: OHLCVData | null = ohlcv ?? (candles.length > 0 ? (() => {
+    const last = candles[candles.length - 1];
+    const change = last.close - last.open;
+    return {
+      open: last.open, high: last.high, low: last.low, close: last.close,
+      volume: last.volume, change, changePct: last.open !== 0 ? (change / last.open) * 100 : 0,
+    };
+  })() : null);
+
+  const isUp = displayOhlcv ? displayOhlcv.close >= displayOhlcv.open : true;
+  const ohlcColor = isUp ? "#22c55e" : "#ef4444";
+
+  // Format numbers compactly
+  const fmt = (n: number) => {
+    if (n >= 1e7) return (n / 1e7).toFixed(2) + "Cr";
+    if (n >= 1e5) return (n / 1e5).toFixed(2) + "L";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return n.toFixed(2);
+  };
+  const fmtP = (n: number) => n.toFixed(2);
+
   return (
     <div ref={wrapperRef} className="flex flex-col w-full h-full">
       <div className="relative flex-1 min-h-[120px]">
-        <div className="absolute top-1 left-2 z-10 flex items-center gap-3 text-[9px] font-mono pointer-events-none">
+        {/* TradingView-style inline OHLCV legend */}
+        <div className="absolute top-1 left-2 z-10 flex items-center gap-2 text-[10px] font-mono pointer-events-none select-none">
+          {displayOhlcv && (
+            <>
+              <span className="text-muted">O</span>
+              <span style={{ color: ohlcColor }}>{fmtP(displayOhlcv.open)}</span>
+              <span className="text-muted">H</span>
+              <span style={{ color: ohlcColor }}>{fmtP(displayOhlcv.high)}</span>
+              <span className="text-muted">L</span>
+              <span style={{ color: ohlcColor }}>{fmtP(displayOhlcv.low)}</span>
+              <span className="text-muted">C</span>
+              <span style={{ color: ohlcColor }}>{fmtP(displayOhlcv.close)}</span>
+              <span style={{ color: ohlcColor, fontSize: "9px" }}>
+                {displayOhlcv.change >= 0 ? "+" : ""}{fmtP(displayOhlcv.change)} ({displayOhlcv.changePct >= 0 ? "+" : ""}{displayOhlcv.changePct.toFixed(2)}%)
+              </span>
+              {displayOhlcv.volume > 0 && (
+                <>
+                  <span className="text-muted ml-1">Vol</span>
+                  <span className="text-muted">{fmt(displayOhlcv.volume)}</span>
+                </>
+              )}
+            </>
+          )}
+          <span className="text-muted">│</span>
           {indicators?.ema13?.some((v) => v != null) && (
             <span style={{ color: "#f59e0b" }}>EMA(13)</span>
           )}
@@ -546,8 +631,8 @@ export default function TradingViewChart({
           )}
           {indicators?.safezone_long?.some((v) => v != null) && (
             <>
-              <span style={{ color: "#22c55e60" }}>SZ-Long</span>
-              <span style={{ color: "#ef444460" }}>SZ-Short</span>
+              <span style={{ color: "#22c55e60" }}>SZ↑</span>
+              <span style={{ color: "#ef444460" }}>SZ↓</span>
             </>
           )}
         </div>
