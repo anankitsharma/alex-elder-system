@@ -1,16 +1,27 @@
 /**
  * WebSocket manager for pipeline and market data connections.
  * Non-React class — dispatches events to Zustand store.
+ *
+ * Features:
+ * - Multi-timeframe routing (all screen timeframes, not just selected interval)
+ * - Running bar updates bypass candle array (no chart flicker)
+ * - Tick counting for activity indicator
+ * - Gap backfill on reconnect
+ * - Exponential backoff with jitter
+ * - REST polling fallback when WS is down
  */
 
 import { useTradingStore } from "@/store/useTradingStore";
+import type { CandleData, IndicatorData } from "@/lib/api";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = BASE.replace(/^http/, "ws");
 
-const HEARTBEAT_TIMEOUT = 45_000; // 45s — mark stale if no message (backend sends every 15s)
+const HEARTBEAT_TIMEOUT = 45_000;
 const MAX_RECONNECT_DELAY = 30_000;
-const REST_POLL_AFTER = 60_000; // Start REST polling if WS down > 60s
+const MAX_RECONNECT_ATTEMPTS = 50;
+const REST_POLL_INTERVAL = 5_000; // Poll every 5s when WS down (fast fallback)
+const REST_POLL_AFTER = 15_000;   // Start polling after 15s disconnected
 
 export class WebSocketManager {
   private pipelineWs: WebSocket | null = null;
@@ -34,7 +45,6 @@ export class WebSocketManager {
   // ── Symbol tracking ─────────────────────────────────────────
 
   trackSymbol(symbol: string, exchange: string) {
-    // Untrack previous if different
     if (this.trackedSymbol && (this.trackedSymbol !== symbol || this.trackedExchange !== exchange)) {
       this.sendPipelineAction("stop_tracking", {
         symbol: this.trackedSymbol,
@@ -63,6 +73,10 @@ export class WebSocketManager {
 
   private connectPipeline() {
     if (this.destroyed) return;
+
+    const store = useTradingStore.getState();
+    store.setWsState("connecting");
+
     try {
       this.pipelineWs = new WebSocket(`${WS_BASE}/ws/pipeline`);
     } catch {
@@ -71,11 +85,14 @@ export class WebSocketManager {
     }
 
     this.pipelineWs.onopen = () => {
+      const store = useTradingStore.getState();
+      const wasDisconnected = this.disconnectedSince;
+
       this.reconnectAttempts = 0;
-      this.disconnectedSince = null;
       this.stopPolling();
-      useTradingStore.getState().setPipelineWsConnected(true);
-      useTradingStore.getState().setDataFreshness("live");
+      store.setPipelineWsConnected(true);
+      store.setWsState("connected");
+      store.setDataFreshness("live");
       this.resetHeartbeat();
 
       // Resubscribe to tracked symbol on reconnect
@@ -85,6 +102,18 @@ export class WebSocketManager {
           exchange: this.trackedExchange,
         });
       }
+
+      // Request backfill if we were disconnected
+      if (wasDisconnected && this.trackedSymbol) {
+        const since = new Date(wasDisconnected).toISOString();
+        this.sendPipelineAction("backfill", {
+          symbol: this.trackedSymbol,
+          exchange: this.trackedExchange,
+          since,
+        });
+      }
+
+      this.disconnectedSince = null;
     };
 
     this.pipelineWs.onmessage = (ev) => {
@@ -98,7 +127,9 @@ export class WebSocketManager {
     };
 
     this.pipelineWs.onclose = () => {
-      useTradingStore.getState().setPipelineWsConnected(false);
+      const store = useTradingStore.getState();
+      store.setPipelineWsConnected(false);
+      store.setWsState(this.reconnectAttempts > 0 ? "reconnecting" : "disconnected");
       if (!this.disconnectedSince) {
         this.disconnectedSince = Date.now();
       }
@@ -120,7 +151,7 @@ export class WebSocketManager {
         const candle = msg.candle as Record<string, unknown>;
         const timeframe = msg.timeframe as string;
         if (candle && msg.symbol === store.symbol) {
-          const candleData = {
+          const candleData: CandleData = {
             timestamp: candle.timestamp as string,
             open: candle.open as number,
             high: candle.high as number,
@@ -128,11 +159,13 @@ export class WebSocketManager {
             close: candle.close as number,
             volume: candle.volume as number,
           };
-          // If timeframe matches current interval, update main store
+
+          // Update per-timeframe screen data (for Three Screen view)
+          store.appendScreenCandle(timeframe, candleData);
+
+          // Also update main store if timeframe matches selected interval
           if (timeframe === store.interval) {
             store.appendCandle(candleData);
-            // Auto-refresh indicators after new candle
-            setTimeout(() => store.fetchIndicators(), 500);
           }
         }
         break;
@@ -141,15 +174,26 @@ export class WebSocketManager {
       case "running_bar": {
         const bar = msg.bar as Record<string, unknown>;
         const timeframe = msg.timeframe as string;
-        if (bar && msg.symbol === store.symbol && timeframe === store.interval) {
-          store.updateLastCandle({
+        if (bar && msg.symbol === store.symbol) {
+          const candleData: CandleData = {
             timestamp: bar.timestamp as string,
             open: bar.open as number,
             high: bar.high as number,
             low: bar.low as number,
             close: bar.close as number,
             volume: bar.volume as number,
-          });
+          };
+
+          // Update per-timeframe screen data
+          store.setScreenRunningBar(timeframe, candleData);
+
+          // Update main store running bar if matching interval
+          if (timeframe === store.interval) {
+            store.updateRunningBar(candleData);
+          }
+
+          // Tick activity — running_bar fires on every tick
+          store.incrementTick();
         }
         break;
       }
@@ -157,9 +201,14 @@ export class WebSocketManager {
       case "indicators": {
         if (msg.symbol === store.symbol && msg.data) {
           const timeframe = msg.timeframe as string;
+          const data = msg.data as IndicatorData;
+
+          // Update per-timeframe screen data
+          store.setScreenIndicators(timeframe, data);
+
+          // Update main store if matching interval
           if (timeframe === store.interval) {
-            // Set indicators directly from WebSocket — no REST round-trip
-            store.setIndicators(msg.data as import("@/lib/api").IndicatorData);
+            store.setIndicators(data);
           }
         }
         break;
@@ -189,14 +238,12 @@ export class WebSocketManager {
       }
 
       case "order": {
-        // Refresh positions/orders when a pipeline order fills
         store.refreshPositions();
         store.refreshOrders();
         break;
       }
 
       case "pipeline_status": {
-        // Update broker connection status from pipeline
         if (typeof msg.feed_connected === "boolean") {
           store.setBrokerConnected(msg.feed_connected as boolean);
         }
@@ -204,10 +251,8 @@ export class WebSocketManager {
       }
 
       case "heartbeat": {
-        // Update broker status from heartbeat
         if (typeof msg.feed_connected === "boolean") {
           store.setBrokerConnected(msg.feed_connected as boolean);
-          // If feed is connected and sending data, we're live
           const age = msg.feed_last_data_age as number;
           if (msg.feed_connected && age >= 0 && age < 60) {
             store.setDataFreshness("live");
@@ -217,7 +262,44 @@ export class WebSocketManager {
         }
         break;
       }
+
+      case "backfill_response": {
+        // Merge backfill candles into store
+        this.handleBackfillResponse(msg);
+        break;
+      }
     }
+  }
+
+  private handleBackfillResponse(msg: Record<string, unknown>) {
+    const store = useTradingStore.getState();
+    const candles = msg.candles as Record<string, Record<string, unknown>[]>;
+    if (!candles) return;
+
+    // candles is { "1d": [...], "1h": [...], "15m": [...] }
+    for (const [tf, bars] of Object.entries(candles)) {
+      if (!Array.isArray(bars) || bars.length === 0) continue;
+
+      const candleData: CandleData[] = bars.map((b) => ({
+        timestamp: b.timestamp as string,
+        open: b.open as number,
+        high: b.high as number,
+        low: b.low as number,
+        close: b.close as number,
+        volume: b.volume as number,
+      }));
+
+      // Append each bar to the screen data
+      for (const c of candleData) {
+        store.appendScreenCandle(tf, c);
+        if (tf === store.interval) {
+          store.appendCandle(c);
+        }
+      }
+    }
+
+    // Refetch indicators for the current interval after backfill
+    store.fetchIndicators();
   }
 
   private resetHeartbeat() {
@@ -229,8 +311,19 @@ export class WebSocketManager {
 
   private schedulePipelineReconnect() {
     if (this.destroyed) return;
-    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, MAX_RECONNECT_DELAY);
+    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      useTradingStore.getState().setWsState("disconnected");
+      this.startPolling();
+      return;
+    }
+
+    // Exponential backoff with jitter to prevent thundering herd
+    const base = Math.min(1000 * 2 ** this.reconnectAttempts, MAX_RECONNECT_DELAY);
+    const jitter = Math.random() * Math.min(base * 0.3, 3000);
+    const delay = base + jitter;
+
     this.reconnectAttempts++;
+    useTradingStore.getState().setWsState("reconnecting");
     this.reconnectTimer = setTimeout(() => this.connectPipeline(), delay);
   }
 
@@ -238,7 +331,6 @@ export class WebSocketManager {
 
   private maybeStartPolling() {
     if (this.destroyed || this.pollTimer) return;
-    // Start polling if WS has been down for > 60s
     setTimeout(() => {
       if (this.disconnectedSince && (Date.now() - this.disconnectedSince) > REST_POLL_AFTER) {
         this.startPolling();
@@ -251,6 +343,7 @@ export class WebSocketManager {
     const store = useTradingStore.getState();
     if (!store.apiOnline) return;
 
+    store.setWsState("polling");
     this.pollTimer = setInterval(() => {
       const s = useTradingStore.getState();
       if (s.pipelineWsConnected) {
@@ -259,7 +352,7 @@ export class WebSocketManager {
       }
       s.fetchCandles();
       s.fetchIndicators();
-    }, 30_000);
+    }, REST_POLL_INTERVAL);
   }
 
   private stopPolling() {
@@ -311,6 +404,16 @@ export class WebSocketManager {
     this.stopPolling();
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    // Send stop_tracking before closing
+    if (this.trackedSymbol && this.pipelineWs?.readyState === WebSocket.OPEN) {
+      try {
+        this.pipelineWs.send(JSON.stringify({
+          action: "stop_tracking",
+          symbol: this.trackedSymbol,
+          exchange: this.trackedExchange,
+        }));
+      } catch { /* best effort */ }
+    }
     this.pipelineWs?.close();
     this.marketWs?.close();
     this.pipelineWs = null;

@@ -140,6 +140,37 @@ async def load_candles(
     return pd.DataFrame(data)
 
 
+async def load_candles_since(
+    session: AsyncSession,
+    instrument_id: int,
+    timeframe: str,
+    since_dt: datetime,
+) -> list[dict]:
+    """Load candles since a timestamp as list of dicts (for backfill)."""
+    stmt = (
+        select(Candle)
+        .where(
+            and_(
+                Candle.instrument_id == instrument_id,
+                Candle.timeframe == timeframe,
+                Candle.timestamp > since_dt,
+            )
+        )
+        .order_by(Candle.timestamp)
+    )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    return [{
+        "timestamp": r.timestamp.isoformat() if hasattr(r.timestamp, 'isoformat') else str(r.timestamp),
+        "open": r.open,
+        "high": r.high,
+        "low": r.low,
+        "close": r.close,
+        "volume": r.volume,
+    } for r in rows]
+
+
 async def detect_candle_gaps(
     session: AsyncSession,
     instrument_id: int,

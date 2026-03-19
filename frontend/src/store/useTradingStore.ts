@@ -27,7 +27,29 @@ export interface PipelineSignal {
   timestamp?: string;
 }
 
-export type DataFreshness = "live" | "stale" | "demo" | "disconnected";
+export type DataFreshness = "live" | "stale" | "demo" | "disconnected" | "reconnecting";
+
+export type WsState = "connecting" | "connected" | "reconnecting" | "disconnected" | "polling";
+
+/** Incremental update descriptor — avoids full array diff in chart components */
+export interface CandleUpdate {
+  type: "append" | "update";
+  candle: CandleData;
+  impulseColor?: string | null;
+}
+
+/** Per-timeframe data slice for multi-screen live updates */
+export interface ScreenSlice {
+  candles: CandleData[];
+  indicators: IndicatorData | null;
+  runningBar: CandleData | null;
+  lastUpdate: CandleUpdate | null;
+  loading: boolean;
+}
+
+function emptyScreenSlice(): ScreenSlice {
+  return { candles: [], indicators: null, runningBar: null, lastUpdate: null, loading: false };
+}
 
 interface TradingStore {
   // ── Asset ──
@@ -39,31 +61,48 @@ interface TradingStore {
   setInterval: (interval: string) => void;
   setToken: (token: string) => void;
 
-  // ── Market Data ──
+  // ── Market Data (main view) ──
   candles: CandleData[];
   indicators: IndicatorData | null;
   source: "live" | "demo" | null;
   loading: boolean;
   lastCandleTime: string | null;
+  runningBar: CandleData | null;
+  lastUpdate: CandleUpdate | null;
   fetchCandles: () => Promise<void>;
   fetchIndicators: () => Promise<void>;
   setIndicators: (data: IndicatorData) => void;
   appendCandle: (candle: CandleData) => void;
-  updateLastCandle: (candle: CandleData) => void;
+  updateRunningBar: (candle: CandleData) => void;
+
+  // ── Multi-timeframe (Three Screen) ──
+  screenData: Record<string, ScreenSlice>;
+  setScreenCandles: (tf: string, candles: CandleData[]) => void;
+  appendScreenCandle: (tf: string, candle: CandleData) => void;
+  setScreenRunningBar: (tf: string, bar: CandleData | null) => void;
+  setScreenIndicators: (tf: string, data: IndicatorData) => void;
+  setScreenLoading: (tf: string, loading: boolean) => void;
 
   // ── Pipeline ──
+  wsState: WsState;
   wsConnected: boolean;
   pipelineWsConnected: boolean;
   dataFreshness: DataFreshness;
   tradingMode: "PAPER" | "LIVE";
   apiOnline: boolean;
   brokerConnected: boolean;
+  setWsState: (v: WsState) => void;
   setWsConnected: (v: boolean) => void;
   setPipelineWsConnected: (v: boolean) => void;
   setDataFreshness: (v: DataFreshness) => void;
   setTradingMode: (v: "PAPER" | "LIVE") => void;
   setApiOnline: (v: boolean) => void;
   setBrokerConnected: (v: boolean) => void;
+
+  // ── Tick Activity ──
+  tickCount: number;
+  lastTickTime: number;
+  incrementTick: () => void;
 
   // ── Signals ──
   signals: PipelineSignal[];
@@ -89,15 +128,23 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   interval: "1d",
   token: "",
   setAsset: (symbol, exchange) => {
-    set({ symbol, exchange, candles: [], indicators: null, loading: true });
-    // Fetch new data after asset change
+    set({
+      symbol, exchange,
+      candles: [], indicators: null, loading: true,
+      runningBar: null, lastUpdate: null,
+      screenData: {},
+    });
     setTimeout(() => {
       get().fetchCandles();
       get().fetchIndicators();
     }, 0);
   },
   setInterval: (interval) => {
-    set({ interval, candles: [], indicators: null, loading: true });
+    set({
+      interval,
+      candles: [], indicators: null, loading: true,
+      runningBar: null, lastUpdate: null,
+    });
     setTimeout(() => {
       get().fetchCandles();
       get().fetchIndicators();
@@ -111,6 +158,8 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   source: null,
   loading: false,
   lastCandleTime: null,
+  runningBar: null,
+  lastUpdate: null,
 
   fetchCandles: async () => {
     const { symbol, exchange, interval } = get();
@@ -124,6 +173,8 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
         source: res.source || null,
         lastCandleTime: lastTime,
         loading: false,
+        runningBar: null,
+        lastUpdate: null,
       });
     } catch {
       set({ loading: false });
@@ -146,36 +197,109 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     set((state) => ({
       candles: [...state.candles, candle],
       lastCandleTime: candle.timestamp,
+      runningBar: null, // Clear running bar when a real candle arrives
+      lastUpdate: { type: "append" as const, candle },
     }));
   },
 
-  updateLastCandle: (candle) => {
+  updateRunningBar: (candle) => {
+    set({
+      runningBar: candle,
+      lastCandleTime: candle.timestamp,
+    });
+  },
+
+  // ── Multi-timeframe (Three Screen) ──
+  screenData: {},
+
+  setScreenCandles: (tf, candles) => {
+    set((state) => ({
+      screenData: {
+        ...state.screenData,
+        [tf]: {
+          ...(state.screenData[tf] || emptyScreenSlice()),
+          candles,
+          loading: false,
+          lastUpdate: null,
+          runningBar: null,
+        },
+      },
+    }));
+  },
+
+  appendScreenCandle: (tf, candle) => {
     set((state) => {
-      if (state.candles.length === 0) return { candles: [candle] };
-      const updated = [...state.candles];
-      const last = updated[updated.length - 1];
-      if (last.timestamp === candle.timestamp) {
-        updated[updated.length - 1] = candle;
-      } else {
-        updated.push(candle);
-      }
-      return { candles: updated, lastCandleTime: candle.timestamp };
+      const slice = state.screenData[tf] || emptyScreenSlice();
+      return {
+        screenData: {
+          ...state.screenData,
+          [tf]: {
+            ...slice,
+            candles: [...slice.candles, candle],
+            runningBar: null,
+            lastUpdate: { type: "append" as const, candle },
+          },
+        },
+      };
+    });
+  },
+
+  setScreenRunningBar: (tf, bar) => {
+    set((state) => {
+      const slice = state.screenData[tf] || emptyScreenSlice();
+      return {
+        screenData: {
+          ...state.screenData,
+          [tf]: { ...slice, runningBar: bar },
+        },
+      };
+    });
+  },
+
+  setScreenIndicators: (tf, data) => {
+    set((state) => {
+      const slice = state.screenData[tf] || emptyScreenSlice();
+      return {
+        screenData: {
+          ...state.screenData,
+          [tf]: { ...slice, indicators: data },
+        },
+      };
+    });
+  },
+
+  setScreenLoading: (tf, loading) => {
+    set((state) => {
+      const slice = state.screenData[tf] || emptyScreenSlice();
+      return {
+        screenData: {
+          ...state.screenData,
+          [tf]: { ...slice, loading },
+        },
+      };
     });
   },
 
   // ── Pipeline ──
+  wsState: "disconnected",
   wsConnected: false,
   pipelineWsConnected: false,
   dataFreshness: "disconnected",
   tradingMode: "PAPER",
   apiOnline: false,
   brokerConnected: false,
+  setWsState: (v) => set({ wsState: v }),
   setWsConnected: (v) => set({ wsConnected: v }),
   setPipelineWsConnected: (v) => set({ pipelineWsConnected: v }),
   setDataFreshness: (v) => set({ dataFreshness: v }),
   setTradingMode: (v) => set({ tradingMode: v }),
   setApiOnline: (v) => set({ apiOnline: v }),
   setBrokerConnected: (v) => set({ brokerConnected: v }),
+
+  // ── Tick Activity ──
+  tickCount: 0,
+  lastTickTime: 0,
+  incrementTick: () => set((state) => ({ tickCount: state.tickCount + 1, lastTickTime: Date.now() })),
 
   // ── Signals ──
   signals: [],

@@ -14,6 +14,7 @@ import {
   type LineData,
   type Time,
   LineStyle,
+  type IPriceLine,
 } from "lightweight-charts";
 import type { CandleData, IndicatorData } from "@/lib/api";
 import { useTheme } from "@/hooks/useTheme";
@@ -47,6 +48,8 @@ export function CandlestickChart({
   const chartRef = useRef<IChartApi | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesRefs = useRef<Record<string, any>>({});
+  const priceLineRef = useRef<IPriceLine | null>(null);
+  const prevCountRef = useRef(0);
   const { theme } = useTheme();
 
   // Create chart once
@@ -275,7 +278,29 @@ export function CandlestickChart({
       refs.szShort.setData([]);
     }
 
-    chartRef.current?.timeScale().fitContent();
+    // Only fit content on initial load / symbol change, not every tick
+    if (candles.length !== prevCountRef.current) {
+      chartRef.current?.timeScale().fitContent();
+      prevCountRef.current = candles.length;
+    }
+
+    // LTP price line on last candle
+    if (candles.length > 0 && refs.candles) {
+      const lastClose = candles[candles.length - 1].close;
+      try {
+        if (priceLineRef.current) {
+          refs.candles.removePriceLine(priceLineRef.current);
+        }
+        priceLineRef.current = refs.candles.createPriceLine({
+          price: lastClose,
+          color: "#2962FF",
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: "",
+        });
+      } catch { /* series may be disposed */ }
+    }
   }, [candles, indicators, height, showVolume]);
 
   return (

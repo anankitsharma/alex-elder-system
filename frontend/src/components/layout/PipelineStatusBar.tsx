@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { useTradingStore } from "@/store/useTradingStore";
+import type { WsState } from "@/store/useTradingStore";
 import { cn } from "@/lib/utils";
 import { RefreshCw } from "lucide-react";
 
@@ -9,6 +11,7 @@ const FRESHNESS_DOT: Record<string, string> = {
   stale: "bg-yellow-500",
   demo: "bg-amber-500",
   disconnected: "bg-red-500",
+  reconnecting: "bg-yellow-500",
 };
 
 const FRESHNESS_LABEL: Record<string, string> = {
@@ -16,6 +19,23 @@ const FRESHNESS_LABEL: Record<string, string> = {
   stale: "STALE",
   demo: "DEMO",
   disconnected: "OFFLINE",
+  reconnecting: "RECONNECTING",
+};
+
+const WS_STATE_LABEL: Record<WsState, string> = {
+  connecting: "Connecting...",
+  connected: "ON",
+  reconnecting: "Reconnecting...",
+  disconnected: "OFF",
+  polling: "Polling",
+};
+
+const WS_STATE_COLOR: Record<WsState, string> = {
+  connecting: "text-yellow-500/70",
+  connected: "text-green-500/70",
+  reconnecting: "text-yellow-500/70",
+  disconnected: "text-red-500/70",
+  polling: "text-amber-500/70",
 };
 
 export function PipelineStatusBar() {
@@ -23,9 +43,41 @@ export function PipelineStatusBar() {
   const tradingMode = useTradingStore((s) => s.tradingMode);
   const lastCandleTime = useTradingStore((s) => s.lastCandleTime);
   const brokerConnected = useTradingStore((s) => s.brokerConnected);
-  const pipelineWsConnected = useTradingStore((s) => s.pipelineWsConnected);
+  const wsState = useTradingStore((s) => s.wsState);
+  const tickCount = useTradingStore((s) => s.tickCount);
+  const lastTickTime = useTradingStore((s) => s.lastTickTime);
   const fetchCandles = useTradingStore((s) => s.fetchCandles);
   const fetchIndicators = useTradingStore((s) => s.fetchIndicators);
+
+  // Pulsing dot animation on tick
+  const [pulsing, setPulsing] = useState(false);
+  const prevTickCount = useRef(tickCount);
+
+  useEffect(() => {
+    if (tickCount !== prevTickCount.current) {
+      prevTickCount.current = tickCount;
+      setPulsing(true);
+      const t = setTimeout(() => setPulsing(false), 300);
+      return () => clearTimeout(t);
+    }
+  }, [tickCount]);
+
+  // Tick rate (ticks per second) — rolling window
+  const tickTimesRef = useRef<number[]>([]);
+  const [tickRate, setTickRate] = useState(0);
+
+  useEffect(() => {
+    if (lastTickTime > 0) {
+      const now = lastTickTime;
+      tickTimesRef.current.push(now);
+      // Keep only last 10 seconds
+      const cutoff = now - 10_000;
+      tickTimesRef.current = tickTimesRef.current.filter((t) => t > cutoff);
+      const elapsed = (now - tickTimesRef.current[0]) / 1000;
+      const rate = elapsed > 0 ? (tickTimesRef.current.length - 1) / elapsed : 0;
+      setTickRate(Math.round(rate * 10) / 10);
+    }
+  }, [lastTickTime]);
 
   const dotColor = FRESHNESS_DOT[dataFreshness] || FRESHNESS_DOT.disconnected;
   const label = FRESHNESS_LABEL[dataFreshness] || "OFFLINE";
@@ -47,9 +99,15 @@ export function PipelineStatusBar() {
 
   return (
     <div className="flex items-center gap-3 px-4 h-7 border-b border-border bg-surface text-[10px] shrink-0">
-      {/* Connection dot + data source */}
+      {/* Connection dot + data source — pulsing on tick */}
       <div className="flex items-center gap-1.5">
-        <span className={cn("w-1.5 h-1.5 rounded-full", dotColor)} />
+        <span
+          className={cn(
+            "w-1.5 h-1.5 rounded-full transition-transform duration-200",
+            dotColor,
+            pulsing && dataFreshness === "live" && "scale-[2] ring-1 ring-green-500/30",
+          )}
+        />
         <span
           className={cn(
             "font-semibold tracking-wide",
@@ -57,7 +115,7 @@ export function PipelineStatusBar() {
               ? "text-green-500"
               : dataFreshness === "demo"
               ? "text-amber-500"
-              : dataFreshness === "stale"
+              : dataFreshness === "stale" || dataFreshness === "reconnecting"
               ? "text-yellow-500"
               : "text-red-500"
           )}
@@ -66,20 +124,34 @@ export function PipelineStatusBar() {
         </span>
       </div>
 
+      {/* Tick rate */}
+      {dataFreshness === "live" && tickRate > 0 && (
+        <span className="text-green-500/60 font-mono">
+          {tickRate} tps
+        </span>
+      )}
+
       {/* Broker feed status */}
       <span className={cn("text-muted", brokerConnected ? "text-green-500/70" : "text-red-500/70")}>
         Feed: {brokerConnected ? "ON" : "OFF"}
       </span>
 
-      {/* Pipeline WS */}
-      <span className={cn("text-muted", pipelineWsConnected ? "text-green-500/70" : "text-red-500/70")}>
-        WS: {pipelineWsConnected ? "ON" : "OFF"}
+      {/* Pipeline WS state */}
+      <span className={cn("text-muted", WS_STATE_COLOR[wsState])}>
+        WS: {WS_STATE_LABEL[wsState]}
       </span>
 
       {/* Last candle time */}
       {ageStr && (
         <span className="text-muted">
           Last bar: {ageStr}
+        </span>
+      )}
+
+      {/* Polling banner */}
+      {wsState === "polling" && (
+        <span className="text-amber-500/80 text-[9px]">
+          Live updates paused — refreshing every 5s
         </span>
       )}
 

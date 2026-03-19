@@ -74,7 +74,14 @@ export function usePipelineInit() {
       }
     }, 30_000);
 
+    // Clean up on page close
+    const onBeforeUnload = () => {
+      ws.destroy();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+
     return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
       ws.destroy();
       _wsManager = null;
       clearInterval(healthInterval);

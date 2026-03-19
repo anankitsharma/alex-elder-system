@@ -92,6 +92,33 @@ class PipelineManager:
         """Get an active session."""
         return self._sessions.get(f"{symbol}:{exchange}")
 
+    async def get_backfill(self, symbol: str, exchange: str, since: str) -> dict:
+        """Get candles since a timestamp for all active timeframes.
+
+        Returns: { "1d": [candle_dicts], "1h": [...], ... }
+        """
+        key = f"{symbol}:{exchange}"
+        session = self._sessions.get(key)
+        if not session or not session.instrument_id:
+            return {}
+
+        from datetime import datetime
+        from app.database import async_session as get_session
+        from app.pipeline import db_persistence as db
+
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        result: dict[str, list[dict]] = {}
+
+        async with get_session() as dbsession:
+            for screen, tf in session.screen_timeframes.items():
+                candles = await db.load_candles_since(
+                    dbsession, session.instrument_id, tf, since_dt
+                )
+                if candles:
+                    result[tf] = candles
+
+        return result
+
     async def shutdown(self):
         """Shut down all sessions."""
         for key in list(self._sessions.keys()):

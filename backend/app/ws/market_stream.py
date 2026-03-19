@@ -219,6 +219,24 @@ async def pipeline_websocket(websocket: WebSocket):
                     if symbol:
                         await pipeline_manager.stop_tracking(symbol, exchange)
 
+                elif action == "backfill":
+                    # Client requests candles missed during disconnect
+                    symbol = request.get("symbol")
+                    exchange = request.get("exchange", "NSE")
+                    since = request.get("since")
+                    if symbol and since:
+                        try:
+                            backfill_data = await pipeline_manager.get_backfill(
+                                symbol, exchange, since
+                            )
+                            await websocket.send_text(json.dumps({
+                                "type": "backfill_response",
+                                "symbol": symbol,
+                                "candles": backfill_data,
+                            }, default=str))
+                        except Exception as e:
+                            logger.warning("Backfill failed: {}", e)
+
                 elif action == "get_status":
                     status = await pipeline_manager.get_status()
                     await websocket.send_text(json.dumps({

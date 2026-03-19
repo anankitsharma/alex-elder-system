@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * TradingView-style multi-pane chart.
+ * TradingView-style multi-pane chart with live incremental updates.
  *
  * Layout (top to bottom):
  *   Main pane — Candlesticks + Volume + EMA + SafeZone + Impulse coloring
@@ -10,16 +10,17 @@
  *   Elder-Ray pane — Bull Power + Bear Power histograms
  *
  * All panes share the same time axis (synced scroll/zoom/crosshair).
- * Only the bottom-most pane shows the time axis.
+ * Uses series.update() for running bars — O(1) instead of O(N) setData().
  */
 
-import { useEffect, useRef, useCallback, useMemo } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import {
   createChart,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
   type IChartApi,
+  type ISeriesApi,
   ColorType,
   CrosshairMode,
   type CandlestickData,
@@ -28,23 +29,21 @@ import {
   type Time,
   type LogicalRange,
   LineStyle,
+  type IPriceLine,
 } from "lightweight-charts";
 import type { CandleData, IndicatorData } from "@/lib/api";
 import { useTheme } from "@/hooks/useTheme";
 import { getChartTheme } from "@/lib/chartTheme";
+import { useTradingStore } from "@/store/useTradingStore";
 
 /* ── props ──────────────────────────────────────────────────────── */
 
 interface TradingViewChartProps {
   candles: CandleData[];
   indicators?: IndicatorData | null;
-  /** Show volume overlay on main chart */
   showVolume?: boolean;
-  /** Show MACD sub-pane */
   showMACD?: boolean;
-  /** Show Force Index sub-pane */
   showForceIndex?: boolean;
-  /** Show Elder-Ray sub-pane */
   showElderRay?: boolean;
 }
 
@@ -54,6 +53,13 @@ const IMPULSE_MAP: Record<string, { body: string; wick: string }> = {
   green:  { body: "#22c55e", wick: "#22c55e88" },
   red:    { body: "#ef4444", wick: "#ef444488" },
   blue:   { body: "#6366f1", wick: "#6366f188" },
+};
+
+// Running bar has slightly transparent colors to distinguish from completed bars
+const RUNNING_IMPULSE_MAP: Record<string, { body: string; wick: string }> = {
+  green:  { body: "#22c55ea0", wick: "#22c55e60" },
+  red:    { body: "#ef4444a0", wick: "#ef444460" },
+  blue:   { body: "#6366f1a0", wick: "#6366f160" },
 };
 
 function toTime(ts: string): Time {
@@ -72,18 +78,17 @@ export default function TradingViewChart({
 }: TradingViewChartProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Refs for each pane's container div
   const mainRef = useRef<HTMLDivElement>(null);
   const macdRef = useRef<HTMLDivElement>(null);
   const fiRef   = useRef<HTMLDivElement>(null);
   const erRef   = useRef<HTMLDivElement>(null);
 
-  // Chart instances
   const chartsRef = useRef<IChartApi[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesRef = useRef<Record<string, any>>({});
   const syncingRef = useRef(false);
   const prevCandleCountRef = useRef(0);
+  const priceLineRef = useRef<IPriceLine | null>(null);
   const { theme: currentTheme } = useTheme();
 
   /* ── determine which sub-panes are active ────────────────────── */
@@ -97,15 +102,14 @@ export default function TradingViewChart({
   /* ── chart creation ──────────────────────────────────────────── */
 
   const buildCharts = useCallback(() => {
-    // Clean up old
     chartsRef.current.forEach((c) => c.remove());
     chartsRef.current = [];
     seriesRef.current = {};
+    priceLineRef.current = null;
 
     const containerWidth = wrapperRef.current?.clientWidth ?? 800;
     const ct = getChartTheme();
 
-    // Collect panes: [container, isLast, height]
     type Pane = { el: HTMLDivElement; last: boolean; };
     const panes: Pane[] = [];
 
@@ -171,9 +175,7 @@ export default function TradingViewChart({
         },
       });
 
-      // ── Create series per pane ──
       if (isMain) {
-        // Candlesticks
         const cs = chart.addSeries(CandlestickSeries, {
           upColor: "#22c55e", downColor: "#ef4444",
           borderUpColor: "#22c55e", borderDownColor: "#ef4444",
@@ -181,7 +183,6 @@ export default function TradingViewChart({
         });
         seriesRef.current.candles = cs;
 
-        // Volume
         if (showVolume) {
           const vol = chart.addSeries(HistogramSeries, {
             priceFormat: { type: "volume" },
@@ -193,22 +194,18 @@ export default function TradingViewChart({
           seriesRef.current.volume = vol;
         }
 
-        // EMA-13
         seriesRef.current.ema13 = chart.addSeries(LineSeries, {
           color: "#f59e0b", lineWidth: 1,
           priceLineVisible: false, lastValueVisible: false,
         });
-        // EMA-22
         seriesRef.current.ema22 = chart.addSeries(LineSeries, {
           color: "#8b5cf6", lineWidth: 1,
           priceLineVisible: false, lastValueVisible: false,
         });
-        // SafeZone long
         seriesRef.current.szLong = chart.addSeries(LineSeries, {
           color: "#22c55e50", lineWidth: 1, lineStyle: LineStyle.Dashed,
           priceLineVisible: false, lastValueVisible: false,
         });
-        // SafeZone short
         seriesRef.current.szShort = chart.addSeries(LineSeries, {
           color: "#ef444450", lineWidth: 1, lineStyle: LineStyle.Dashed,
           priceLineVisible: false, lastValueVisible: false,
@@ -255,7 +252,7 @@ export default function TradingViewChart({
       charts.push(chart);
     }
 
-    // ── Sync visible range ──
+    // Sync visible range
     charts.forEach((chart, idx) => {
       chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
         if (syncingRef.current || !range) return;
@@ -269,8 +266,7 @@ export default function TradingViewChart({
       });
     });
 
-    // ── Sync crosshair ──
-    // Map each chart to its first series (setCrosshairPosition requires a series ref)
+    // Sync crosshair
     const seriesForChart = charts.map((_, idx) => {
       const paneEl = panes[idx]?.el;
       if (paneEl === mainRef.current) return seriesRef.current.candles;
@@ -305,7 +301,6 @@ export default function TradingViewChart({
   useEffect(() => {
     buildCharts();
 
-    // ResizeObserver — updates chart width + main pane height on container resize
     const onResize = () => {
       if (!wrapperRef.current) return;
       const w = wrapperRef.current.clientWidth;
@@ -323,10 +318,11 @@ export default function TradingViewChart({
       chartsRef.current.forEach((c) => c.remove());
       chartsRef.current = [];
       seriesRef.current = {};
+      priceLineRef.current = null;
     };
   }, [buildCharts]);
 
-  /* ── update data ─────────────────────────────────────────────── */
+  /* ── full data load (initial + symbol/interval change) ─────── */
 
   useEffect(() => {
     const s = seriesRef.current;
@@ -334,7 +330,7 @@ export default function TradingViewChart({
 
     const hasImpulse = indicators?.impulse_color?.some((v) => v != null);
 
-    // ── Main: Candles ──
+    // Main: Candles
     const cd: CandlestickData[] = candles.map((c, i) => {
       const base: CandlestickData = {
         time: toTime(c.timestamp),
@@ -349,7 +345,7 @@ export default function TradingViewChart({
     });
     s.candles.setData(cd);
 
-    // ── Main: Volume ──
+    // Main: Volume
     if (s.volume) {
       const vd: HistogramData[] = candles.map((c, i) => {
         let color = c.close >= c.open ? "#22c55e30" : "#ef444430";
@@ -364,7 +360,6 @@ export default function TradingViewChart({
       s.volume.setData(vd);
     }
 
-    // Helper to build LineData from an indicator array
     const line = (arr?: (number | null)[]) => {
       if (!arr) return [];
       const out: LineData[] = [];
@@ -374,13 +369,12 @@ export default function TradingViewChart({
       return out;
     };
 
-    // ── Main: EMA + SafeZone overlays ──
     s.ema13?.setData(line(indicators?.ema13));
     s.ema22?.setData(line(indicators?.ema22));
     s.szLong?.setData(line(indicators?.safezone_long));
     s.szShort?.setData(line(indicators?.safezone_short));
 
-    // ── MACD pane ──
+    // MACD pane
     if (s.macdHist && indicators?.macd_histogram) {
       const hd: HistogramData[] = [];
       for (let i = 0; i < candles.length; i++) {
@@ -397,7 +391,7 @@ export default function TradingViewChart({
     s.macdLine?.setData(line(indicators?.macd_line));
     s.macdSignal?.setData(line(indicators?.macd_signal));
 
-    // ── Force Index pane ──
+    // Force Index pane
     if (s.fi2 && indicators?.force_index_2) {
       const fd: HistogramData[] = [];
       for (let i = 0; i < candles.length; i++) {
@@ -412,7 +406,7 @@ export default function TradingViewChart({
     }
     if (s.fi13) s.fi13.setData(line(indicators?.force_index));
 
-    // ── Elder-Ray pane ──
+    // Elder-Ray pane
     if (s.erBull && indicators?.elder_ray_bull) {
       const bd: HistogramData[] = [];
       for (let i = 0; i < candles.length; i++) {
@@ -438,25 +432,95 @@ export default function TradingViewChart({
       s.erBear.setData(bd);
     }
 
-    // Fit content on the main chart only on full reload (not incremental)
-    if (candles.length !== prevCandleCountRef.current) {
-      chartsRef.current[0]?.timeScale().fitContent();
+    // Sync all panes to same visible range
+    const mainChart = chartsRef.current[0];
+    if (mainChart) {
+      // fitContent on initial load or when candle count changes
+      if (candles.length !== prevCandleCountRef.current) {
+        mainChart.timeScale().fitContent();
+      }
+      // Always sync sub-charts to main chart range (handles chart rebuild on indicator load)
+      requestAnimationFrame(() => {
+        try {
+          const range = mainChart.timeScale().getVisibleLogicalRange();
+          if (range) {
+            chartsRef.current.forEach((c, idx) => {
+              if (idx > 0) {
+                c.timeScale().setVisibleLogicalRange(range);
+              }
+            });
+          }
+        } catch { /* charts may have been disposed during rebuild */ }
+      });
     }
     prevCandleCountRef.current = candles.length;
   }, [candles, indicators]);
 
+  /* ── running bar — incremental update via series.update() ───── */
+
+  const runningBar = useTradingStore((s) => s.runningBar);
+
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s.candles || !runningBar) return;
+
+    const time = toTime(runningBar.timestamp);
+
+    // Update candle — same timestamp = in-place update, new timestamp = append
+    s.candles.update({
+      time,
+      open: runningBar.open,
+      high: runningBar.high,
+      low: runningBar.low,
+      close: runningBar.close,
+      // Slightly different border to indicate running bar
+      borderColor: runningBar.close >= runningBar.open ? "#22c55ecc" : "#ef4444cc",
+    } as CandlestickData);
+
+    // Update volume running bar
+    if (s.volume) {
+      s.volume.update({
+        time,
+        value: runningBar.volume,
+        color: runningBar.close >= runningBar.open ? "#22c55e30" : "#ef444430",
+      } as HistogramData);
+    }
+
+    // Update LTP price line
+    updatePriceLine(s.candles, runningBar.close);
+  }, [runningBar]);
+
+  /** Create/update a horizontal dashed line showing last traded price */
+  function updatePriceLine(
+    series: ISeriesApi<"Candlestick">,
+    price: number,
+  ) {
+    try {
+      if (priceLineRef.current) {
+        series.removePriceLine(priceLineRef.current);
+      }
+      priceLineRef.current = series.createPriceLine({
+        price,
+        color: "#2962FF",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "LTP",
+      });
+    } catch {
+      // series may be disposed
+    }
+  }
+
   /* ── render ──────────────────────────────────────────────────── */
 
-  // Determine FI label
   const fiLabel = indicators?.force_index_2?.some((v) => v != null) && indicators?.force_index?.some((v) => v != null)
     ? "Force Index(2,13)"
     : indicators?.force_index_2?.some((v) => v != null) ? "Force Index(2)" : "Force Index(13)";
 
   return (
     <div ref={wrapperRef} className="flex flex-col w-full h-full">
-      {/* Main price chart — fills remaining space */}
       <div className="relative flex-1 min-h-[120px]">
-        {/* Legend */}
         <div className="absolute top-1 left-2 z-10 flex items-center gap-3 text-[9px] font-mono pointer-events-none">
           {indicators?.ema13?.some((v) => v != null) && (
             <span style={{ color: "#f59e0b" }}>EMA(13)</span>
@@ -474,7 +538,6 @@ export default function TradingViewChart({
         <div ref={mainRef} className="absolute inset-0" />
       </div>
 
-      {/* MACD pane */}
       {hasMACD && (
         <div className="relative" style={{ height: 100 }}>
           <span className="absolute top-0.5 left-2 z-10 text-[9px] font-mono text-border-light pointer-events-none">
@@ -484,7 +547,6 @@ export default function TradingViewChart({
         </div>
       )}
 
-      {/* Force Index pane */}
       {hasFI && (
         <div className="relative" style={{ height: 80 }}>
           <span className="absolute top-0.5 left-2 z-10 text-[9px] font-mono text-border-light pointer-events-none">
@@ -494,7 +556,6 @@ export default function TradingViewChart({
         </div>
       )}
 
-      {/* Elder-Ray pane */}
       {hasER && (
         <div className="relative" style={{ height: 80 }}>
           <span className="absolute top-0.5 left-2 z-10 text-[9px] font-mono text-border-light pointer-events-none">
