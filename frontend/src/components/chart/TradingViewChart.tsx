@@ -449,27 +449,34 @@ export default function TradingViewChart({
     }
 
     // Sync all panes to the main chart's visible range.
-    // 1. fitContent on main chart first to establish the canonical range
-    // 2. Temporarily disable scroll sync to prevent cascading
-    // 3. Force all sub-charts to the exact same logical range
+    // Lock syncingRef for the entire alignment process to prevent
+    // cascading async range-change events from overriding sub-charts.
     const mainChart = chartsRef.current[0];
     if (mainChart) {
+      syncingRef.current = true; // Lock early to suppress ALL range events during alignment
       mainChart.timeScale().fitContent();
-      // Use setTimeout to let the main chart settle its layout, then force-sync
-      setTimeout(() => {
+
+      // Multiple sync passes: sub-charts fire async range events that can
+      // override each other. We sync at 50ms, 150ms, and 300ms, then unlock.
+      const doSync = () => {
         try {
           const range = mainChart.timeScale().getVisibleLogicalRange();
           if (range) {
-            syncingRef.current = true;
             chartsRef.current.forEach((c, idx) => {
               if (idx > 0) {
                 try { c.timeScale().setVisibleLogicalRange(range); } catch { /* disposed */ }
               }
             });
-            syncingRef.current = false;
           }
         } catch { /* disposed */ }
-      }, 50);
+      };
+
+      setTimeout(doSync, 50);
+      setTimeout(doSync, 150);
+      setTimeout(() => {
+        doSync();
+        syncingRef.current = false; // Unlock after all passes
+      }, 300);
     }
     prevCandleCountRef.current = candles.length;
   }, [candles, indicators]);
