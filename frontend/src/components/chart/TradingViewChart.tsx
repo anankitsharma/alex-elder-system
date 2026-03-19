@@ -252,16 +252,22 @@ export default function TradingViewChart({
       charts.push(chart);
     }
 
-    // Sync visible range
+    // Sync visible range using TIME-BASED range (not logical index).
+    // This ensures alignment even when charts have different data lengths.
     charts.forEach((chart, idx) => {
-      chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
-        if (syncingRef.current || !range) return;
+      chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+        if (syncingRef.current) return;
         syncingRef.current = true;
-        charts.forEach((other, oidx) => {
-          if (oidx !== idx) {
-            other.timeScale().setVisibleLogicalRange(range);
+        try {
+          const timeRange = chart.timeScale().getVisibleRange();
+          if (timeRange) {
+            charts.forEach((other, oidx) => {
+              if (oidx !== idx) {
+                try { other.timeScale().setVisibleRange(timeRange); } catch { /* ok */ }
+              }
+            });
           }
-        });
+        } catch { /* ok */ }
         syncingRef.current = false;
       });
     });
@@ -360,123 +366,108 @@ export default function TradingViewChart({
       s.volume.setData(vd);
     }
 
-    // IMPORTANT: All sub-chart series must include data points for EVERY
-    // candle timestamp (even nulls → value 0, transparent). This ensures
-    // sub-charts have the same number of logical indices as the main chart,
-    // so scroll/zoom sync via setVisibleLogicalRange stays aligned.
-    const TRANSPARENT = "rgba(0,0,0,0)";
+    // Sub-chart data uses indicator timestamps as the source of truth.
+    // This decouples sub-charts from candle count — even if candles and
+    // indicators have different lengths, each chart shows all its own data.
+    // Time-based sync (not logical-index) keeps them aligned on scroll.
+    const indTs = indicators?.timestamps ?? [];
+    const indLen = indTs.length;
 
-    const line = (arr?: (number | null)[]) => {
+    // Overlays on main chart use candle timestamps (same chart instance)
+    const overlayLine = (arr?: (number | null)[]) => {
       if (!arr) return [];
       const out: LineData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        out.push({
-          time: toTime(candles[i].timestamp),
-          value: arr[i] != null ? (arr[i] as number) : 0,
-        });
+      for (let i = 0; i < candles.length && i < arr.length; i++) {
+        if (arr[i] != null) {
+          out.push({ time: toTime(candles[i].timestamp), value: arr[i] as number });
+        }
       }
       return out;
     };
 
-    s.ema13?.setData(line(indicators?.ema13));
-    s.ema22?.setData(line(indicators?.ema22));
-    s.szLong?.setData(line(indicators?.safezone_long));
-    s.szShort?.setData(line(indicators?.safezone_short));
+    s.ema13?.setData(overlayLine(indicators?.ema13));
+    s.ema22?.setData(overlayLine(indicators?.ema22));
+    s.szLong?.setData(overlayLine(indicators?.safezone_long));
+    s.szShort?.setData(overlayLine(indicators?.safezone_short));
 
-    // MACD pane — all timestamps included, null → 0 with transparent color
-    if (s.macdHist && indicators?.macd_histogram) {
-      const hd: HistogramData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        const val = indicators.macd_histogram[i];
-        const time = toTime(candles[i].timestamp);
-        if (val == null) {
-          hd.push({ time, value: 0, color: TRANSPARENT });
-          continue;
+    // Sub-chart line builder — uses indicator timestamps, skips nulls
+    const indLine = (arr?: (number | null)[]) => {
+      if (!arr) return [];
+      const out: LineData[] = [];
+      for (let i = 0; i < indLen && i < arr.length; i++) {
+        if (arr[i] != null) {
+          out.push({ time: toTime(indTs[i]), value: arr[i] as number });
         }
-        const prev = i > 0 ? indicators.macd_histogram[i - 1] : null;
-        const color = val >= 0
+      }
+      return out;
+    };
+
+    // Sub-chart histogram builder — uses indicator timestamps, skips nulls
+    const indHist = (arr: (number | null)[], colorFn: (val: number, i: number) => string) => {
+      const out: HistogramData[] = [];
+      for (let i = 0; i < indLen && i < arr.length; i++) {
+        if (arr[i] != null) {
+          out.push({ time: toTime(indTs[i]), value: arr[i] as number, color: colorFn(arr[i] as number, i) });
+        }
+      }
+      return out;
+    };
+
+    // MACD pane
+    if (s.macdHist && indicators?.macd_histogram) {
+      s.macdHist.setData(indHist(indicators.macd_histogram, (val, i) => {
+        const prev = i > 0 ? indicators!.macd_histogram[i - 1] : null;
+        return val >= 0
           ? (prev != null && val > prev ? "#26A69A" : "#B2DFDB")
           : (prev != null && val > prev ? "#FFCDD2" : "#FF5252");
-        hd.push({ time, value: val, color });
-      }
-      s.macdHist.setData(hd);
+      }));
     }
-    s.macdLine?.setData(line(indicators?.macd_line));
-    s.macdSignal?.setData(line(indicators?.macd_signal));
+    s.macdLine?.setData(indLine(indicators?.macd_line));
+    s.macdSignal?.setData(indLine(indicators?.macd_signal));
 
     // Force Index pane
     if (s.fi2 && indicators?.force_index_2) {
-      const fd: HistogramData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        const val = indicators.force_index_2[i];
-        const time = toTime(candles[i].timestamp);
-        if (val == null) {
-          fd.push({ time, value: 0, color: TRANSPARENT });
-          continue;
-        }
-        fd.push({ time, value: val, color: val >= 0 ? "#26a69a80" : "#ef535080" });
-      }
-      s.fi2.setData(fd);
+      s.fi2.setData(indHist(indicators.force_index_2, (val) =>
+        val >= 0 ? "#26a69a80" : "#ef535080"
+      ));
     }
-    if (s.fi13) s.fi13.setData(line(indicators?.force_index));
+    if (s.fi13) s.fi13.setData(indLine(indicators?.force_index));
 
     // Elder-Ray pane
     if (s.erBull && indicators?.elder_ray_bull) {
-      const bd: HistogramData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        const val = indicators.elder_ray_bull[i];
-        const time = toTime(candles[i].timestamp);
-        if (val == null) {
-          bd.push({ time, value: 0, color: TRANSPARENT });
-          continue;
-        }
-        bd.push({ time, value: val, color: val >= 0 ? "#26a69a" : "#26a69a60" });
-      }
-      s.erBull.setData(bd);
+      s.erBull.setData(indHist(indicators.elder_ray_bull, (val) =>
+        val >= 0 ? "#26a69a" : "#26a69a60"
+      ));
     }
     if (s.erBear && indicators?.elder_ray_bear) {
-      const bd: HistogramData[] = [];
-      for (let i = 0; i < candles.length; i++) {
-        const val = indicators.elder_ray_bear[i];
-        const time = toTime(candles[i].timestamp);
-        if (val == null) {
-          bd.push({ time, value: 0, color: TRANSPARENT });
-          continue;
-        }
-        bd.push({ time, value: val, color: val <= 0 ? "#ef5350" : "#ef535060" });
-      }
-      s.erBear.setData(bd);
+      s.erBear.setData(indHist(indicators.elder_ray_bear, (val) =>
+        val <= 0 ? "#ef5350" : "#ef535060"
+      ));
     }
 
-    // Sync all panes to the main chart's visible range.
-    // Lock syncingRef for the entire alignment process to prevent
-    // cascading async range-change events from overriding sub-charts.
+    // Sync all panes using TIME-BASED range from main chart.
+    // fitContent on main chart, then force sub-charts to same time window.
     const mainChart = chartsRef.current[0];
     if (mainChart) {
-      syncingRef.current = true; // Lock early to suppress ALL range events during alignment
+      syncingRef.current = true;
       mainChart.timeScale().fitContent();
 
-      // Multiple sync passes: sub-charts fire async range events that can
-      // override each other. We sync at 50ms, 150ms, and 300ms, then unlock.
       const doSync = () => {
         try {
-          const range = mainChart.timeScale().getVisibleLogicalRange();
+          const range = mainChart.timeScale().getVisibleRange();
           if (range) {
             chartsRef.current.forEach((c, idx) => {
               if (idx > 0) {
-                try { c.timeScale().setVisibleLogicalRange(range); } catch { /* disposed */ }
+                try { c.timeScale().setVisibleRange(range); } catch { /* ok */ }
               }
             });
           }
         } catch { /* disposed */ }
       };
 
+      // Two passes with time-based sync, then unlock
       setTimeout(doSync, 50);
-      setTimeout(doSync, 150);
-      setTimeout(() => {
-        doSync();
-        syncingRef.current = false; // Unlock after all passes
-      }, 300);
+      setTimeout(() => { doSync(); syncingRef.current = false; }, 200);
     }
     prevCandleCountRef.current = candles.length;
   }, [candles, indicators]);
