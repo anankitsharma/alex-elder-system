@@ -448,11 +448,29 @@ export default function TradingViewChart({
       s.erBear.setData(bd);
     }
 
-    // Sync all panes: fitContent on every chart so they all show full data range,
-    // then the subscribeVisibleLogicalRangeChange sync keeps them aligned on scroll/zoom
-    chartsRef.current.forEach((c) => {
-      try { c.timeScale().fitContent(); } catch { /* disposed */ }
-    });
+    // Sync all panes to the main chart's visible range.
+    // 1. fitContent on main chart first to establish the canonical range
+    // 2. Temporarily disable scroll sync to prevent cascading
+    // 3. Force all sub-charts to the exact same logical range
+    const mainChart = chartsRef.current[0];
+    if (mainChart) {
+      mainChart.timeScale().fitContent();
+      // Use setTimeout to let the main chart settle its layout, then force-sync
+      setTimeout(() => {
+        try {
+          const range = mainChart.timeScale().getVisibleLogicalRange();
+          if (range) {
+            syncingRef.current = true;
+            chartsRef.current.forEach((c, idx) => {
+              if (idx > 0) {
+                try { c.timeScale().setVisibleLogicalRange(range); } catch { /* disposed */ }
+              }
+            });
+            syncingRef.current = false;
+          }
+        } catch { /* disposed */ }
+      }, 50);
+    }
     prevCandleCountRef.current = candles.length;
   }, [candles, indicators]);
 
