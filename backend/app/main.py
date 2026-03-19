@@ -1,7 +1,13 @@
 """FastAPI application entry point."""
 
 import asyncio
+import sys
 import time
+
+# Windows: use SelectorEventLoop for thread-safe coroutine scheduling
+# (ProactorEventLoop's call_soon_threadsafe raises [Errno 22] from feed threads)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -16,7 +22,7 @@ from app.config import settings
 from app.database import init_db
 from app.broker.angel_client import angel
 from app.broker.websocket_feed import market_feed
-from app.ws.market_stream import on_tick_received, broadcast_pipeline_event
+from app.ws.market_stream import on_tick_received, broadcast_pipeline_event, set_main_loop, start_tick_poller
 from app.pipeline import pipeline_manager
 
 # Import routers
@@ -86,6 +92,9 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Store main event loop for thread-safe scheduling from feed callbacks
+    set_main_loop(asyncio.get_running_loop())
+
     # Wire pipeline manager broadcast
     pipeline_manager.set_broadcast(broadcast_pipeline_event)
 
@@ -99,7 +108,8 @@ async def lifespan(app: FastAPI):
         if success:
             logger.info("All Angel One API sessions active")
             market_feed.add_callback(on_tick_received)
-            market_feed.add_callback(pipeline_manager.on_tick)
+            # Pipeline routing is handled by the tick poller (avoids cross-thread async issues)
+            start_tick_poller()
             # Start WebSocket feed in background thread (connect() is blocking)
             import threading
             feed_thread = threading.Thread(target=market_feed.connect, daemon=True)

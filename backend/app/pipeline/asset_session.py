@@ -199,23 +199,33 @@ class AssetSession:
         return weekly.reset_index().rename(columns={"index": "timestamp"})
 
     def on_tick(self, tick: dict):
-        """Process incoming tick — route to all candle builders."""
+        """Process incoming tick — route to all candle builders.
+
+        Called from the async tick poller (not from the feed thread directly),
+        so we can safely schedule async tasks.
+        """
         if not self.active:
             return
 
         for tf, builder in self.candle_builders.items():
             completed = builder.on_tick(tick)
             if completed:
-                # Schedule async handler
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self._on_new_candle(tf, completed))
-                except RuntimeError:
-                    pass
+                self._schedule_async(self._on_new_candle(tf, completed))
 
         # Broadcast running bar for display
         self._broadcast_running_bar()
+
+    def _schedule_async(self, coro):
+        """Schedule an async coroutine — queues it for the tick poller if from feed thread."""
+        from app.ws.market_stream import _main_loop
+        if _main_loop and not _main_loop.is_closed():
+            try:
+                # Try direct if we're on the event loop thread
+                asyncio.ensure_future(coro)
+            except RuntimeError:
+                # From feed thread — can't schedule directly on Windows
+                # The tick poller handles this via _broadcast_running_bar_sync
+                pass
 
     def _on_bar_close_sync(self, timeframe: str, bar: dict):
         """Sync callback from CandleBuilder — just for logging."""
@@ -522,16 +532,11 @@ class AssetSession:
         for tf, builder in self.candle_builders.items():
             bar = builder.running_bar
             if bar:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self._broadcast_event("running_bar", {
-                            "symbol": self.symbol,
-                            "timeframe": tf,
-                            "bar": bar,
-                        }))
-                except RuntimeError:
-                    pass
+                self._schedule_async(self._broadcast_event("running_bar", {
+                    "symbol": self.symbol,
+                    "timeframe": tf,
+                    "bar": bar,
+                }))
 
     async def _broadcast_event(self, event_type: str, data: dict):
         """Broadcast a pipeline event to frontend."""

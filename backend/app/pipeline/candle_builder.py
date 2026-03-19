@@ -82,7 +82,7 @@ class CandleBuilder:
         Returns:
             Completed bar dict if a bar closed, else None.
         """
-        ltp = float(tick.get("ltp", 0))
+        ltp = float(tick.get("last_traded_price", 0) or tick.get("ltp", 0))
         if ltp <= 0:
             return None
 
@@ -109,13 +109,13 @@ class CandleBuilder:
             return None
 
         # Calculate volume delta from cumulative
-        cum_vol = int(tick.get("volume_trade_today", 0))
+        cum_vol = int(tick.get("volume_trade_today", 0) or tick.get("volume_traded_today", 0))
         if cum_vol > 0 and self._prev_cum_volume > 0:
             vol_delta = max(cum_vol - self._prev_cum_volume, 0)
         elif cum_vol > 0:
             vol_delta = 0  # First tick — can't compute delta
         else:
-            vol_delta = int(tick.get("volume", 0))
+            vol_delta = int(tick.get("last_traded_quantity", 0) or tick.get("volume", 0))
         self._prev_cum_volume = cum_vol
 
         # Determine bar period

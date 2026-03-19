@@ -10,6 +10,38 @@ from loguru import logger
 
 router = APIRouter()
 
+# ── Main event loop reference (set at startup) ───────────────
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+# Thread-safe tick queue: feed thread appends, async poller consumes
+_tick_queue: list[dict] = []
+_tick_poller_task: asyncio.Task | None = None
+
+def set_main_loop(loop: asyncio.AbstractEventLoop):
+    """Store reference to the main asyncio event loop for thread-safe scheduling."""
+    global _main_loop
+    _main_loop = loop
+
+async def _tick_poller():
+    """Async task that polls the tick queue and broadcasts + routes ticks."""
+    from app.pipeline import pipeline_manager
+    while True:
+        if _tick_queue:
+            # Drain all queued ticks
+            batch = list(_tick_queue)
+            _tick_queue.clear()
+            for data in batch:
+                await broadcast_tick(data)
+                # Route to pipeline
+                pipeline_manager.on_tick(data)
+        await asyncio.sleep(0.05)  # 50ms poll = up to 20 batches/sec
+
+def start_tick_poller():
+    """Start the async tick polling task."""
+    global _tick_poller_task
+    if _tick_poller_task is None or _tick_poller_task.done():
+        _tick_poller_task = asyncio.create_task(_tick_poller())
+
 # ── Raw tick stream (/ws/market) ─────────────────────────────
 
 # Connected frontend clients for raw ticks
@@ -43,24 +75,19 @@ async def broadcast_tick(data: dict):
 def on_tick_received(tick_data: Any):
     """Callback for MarketFeed — schedules broadcast to WebSocket clients.
 
-    This runs in SmartWebSocketV2's thread, so we schedule the async broadcast
-    on the main event loop.
+    This runs in SmartWebSocketV2's thread, so we use the stored main loop
+    reference with call_soon_threadsafe to schedule the async broadcast.
     """
     if isinstance(tick_data, dict):
         data = tick_data
     else:
-        # SmartWebSocketV2 may send binary data; parse as needed
         try:
             data = json.loads(tick_data) if isinstance(tick_data, str) else tick_data
         except (json.JSONDecodeError, TypeError):
             return
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(broadcast_tick(data))
-    except RuntimeError:
-        pass
+    # Queue the tick for the async poller to pick up (avoids cross-thread async issues on Windows)
+    _tick_queue.append(data)
 
 
 @router.websocket("/ws/market")
