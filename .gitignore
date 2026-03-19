@@ -32,3 +32,5 @@ frontend/e2e/*.png
 
 # Playwright test results
 frontend/test-results/
+plan/test-screenshots/
+plan/image copy*
