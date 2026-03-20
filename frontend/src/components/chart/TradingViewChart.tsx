@@ -165,12 +165,12 @@ export default function TradingViewChart({
         crosshair: isMain
           ? {
               mode: CrosshairMode.Normal,
-              vertLine: { color: crossColor, width: 1, style: 2, labelVisible: false },
+              vertLine: { color: crossColor, width: 1, style: 2, labelVisible: true },
               horzLine: { color: crossColor, width: 1, style: 2 },
             }
           : {
               mode: CrosshairMode.Normal,
-              vertLine: { color: crossColor, width: 1, style: 2, labelVisible: false },
+              vertLine: { color: crossColor, width: 1, style: 2, labelVisible: true },
               horzLine: { color: crossColorDim, width: 1, style: 2 },
             },
         rightPriceScale: {
@@ -184,6 +184,8 @@ export default function TradingViewChart({
           visible: pane.last,
           timeVisible: true,
           secondsVisible: false,
+          rightOffset: 20,               // Empty space on right (like TradingView)
+          shiftVisibleRangeOnNewBar: true, // Auto-scroll on new bars
         },
       });
 

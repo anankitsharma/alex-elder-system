@@ -83,7 +83,7 @@ export function CandlestickChart({
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: ct.accent + "80", width: 1, style: 2, labelVisible: false },
+        vertLine: { color: ct.accent + "80", width: 1, style: 2, labelVisible: true },
         horzLine: { color: ct.accent + "80", width: 1, style: 2 },
       },
       rightPriceScale: {
@@ -94,6 +94,8 @@ export function CandlestickChart({
         borderColor: ct.border,
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: 10,
+        shiftVisibleRangeOnNewBar: true,
       },
     });
 
