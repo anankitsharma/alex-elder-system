@@ -112,6 +112,10 @@ interface TradingStore {
   setTripleScreen: (result: TripleScreenResult | null) => void;
   clearSignals: () => void;
 
+  // ── Command Center ──
+  commandCenterAssets: import("@/lib/api").CommandCenterAsset[];
+  setCommandCenterAssets: (assets: import("@/lib/api").CommandCenterAsset[]) => void;
+
   // ── Trades ──
   positions: any[];
   orders: any[];
@@ -313,6 +317,10 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   },
   setTripleScreen: (result) => set({ tripleScreen: result }),
   clearSignals: () => set({ signals: [], activeSignal: null }),
+
+  // ── Command Center ──
+  commandCenterAssets: [],
+  setCommandCenterAssets: (assets) => set({ commandCenterAssets: assets }),
 
   // ── Trades ──
   positions: [],

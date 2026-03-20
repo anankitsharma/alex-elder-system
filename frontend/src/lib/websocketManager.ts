@@ -247,6 +247,14 @@ export class WebSocketManager {
         break;
       }
 
+      case "command_center": {
+        const assets = msg.assets as import("@/lib/api").CommandCenterAsset[];
+        if (Array.isArray(assets)) {
+          store.setCommandCenterAssets(assets);
+        }
+        break;
+      }
+
       case "pipeline_status": {
         if (typeof msg.feed_connected === "boolean") {
           store.setBrokerConnected(msg.feed_connected as boolean);

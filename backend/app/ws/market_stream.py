@@ -207,6 +207,22 @@ async def _heartbeat_loop():
                 except Exception as e:
                     logger.debug("Periodic indicator refresh failed for {}: {}", key, e)
 
+        # ── Command center broadcast (every 5s) ──
+        if not hasattr(_heartbeat_loop, '_last_cc'):
+            _heartbeat_loop._last_cc = 0.0
+        if now - _heartbeat_loop._last_cc >= 5 and _pipeline_clients:
+            _heartbeat_loop._last_cc = now
+            try:
+                summaries = pipeline_manager.get_all_summaries()
+                if summaries:
+                    await broadcast_pipeline_event({
+                        "type": "command_center",
+                        "assets": summaries,
+                        "ts": now,
+                    })
+            except Exception:
+                pass
+
         await asyncio.sleep(0.05)  # 50ms poll cycle
 
 

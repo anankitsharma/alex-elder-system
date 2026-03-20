@@ -71,3 +71,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Multi-asset tracking list for F&O pipeline
+TRACKED_INSTRUMENTS = [
+    ("NIFTY", "NFO"),
+    ("BANKNIFTY", "NFO"),
+    ("GOLDM", "MCX"),
+    ("SILVERM", "MCX"),
+    ("COPPER", "MCX"),
+    ("ALUMINIUM", "MCX"),
+    ("ZINC", "MCX"),
+]

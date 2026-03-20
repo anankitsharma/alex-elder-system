@@ -119,6 +119,10 @@ class PipelineManager:
 
         return result
 
+    def get_all_summaries(self) -> list[dict]:
+        """Compact summaries for all active sessions (command center)."""
+        return [s.get_summary() for s in self._sessions.values() if s.active]
+
     async def shutdown(self):
         """Shut down all sessions."""
         for key in list(self._sessions.keys()):

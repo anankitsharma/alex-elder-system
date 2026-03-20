@@ -597,6 +597,54 @@ class AssetSession:
             ),
         }
 
+    def get_summary(self) -> dict:
+        """Compact summary for command center dashboard."""
+        ltp = None
+        change_pct = None
+        prev_close = None
+
+        # Get LTP from the most recent candle buffer (screen 2 timeframe)
+        screen2_tf = self.screen_timeframes.get("2", "1d")
+        df = self.candle_buffers.get(screen2_tf, pd.DataFrame())
+        if not df.empty:
+            ltp = float(df.iloc[-1].get("close", 0))
+            if len(df) >= 2:
+                prev_close = float(df.iloc[-2].get("close", 0))
+                if prev_close > 0:
+                    change_pct = round((ltp - prev_close) / prev_close * 100, 2)
+
+        # Check running bar for latest price
+        for tf, builder in self.candle_builders.items():
+            bar = builder.running_bar
+            if bar and bar.get("close"):
+                ltp = bar["close"]
+                break
+
+        # Extract analysis
+        a = self.latest_analysis
+        s1 = a.get("screen1", {}) if a else {}
+        s2 = a.get("screen2", {}) if a else {}
+        rec = a.get("recommendation", {}) if a else {}
+
+        return {
+            "symbol": self.symbol,
+            "exchange": self.exchange,
+            "ltp": ltp,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "tide": s1.get("tide"),
+            "ema_trend": s1.get("ema_trend"),
+            "impulse": s1.get("impulse_signal"),
+            "wave_signal": s2.get("signal"),
+            "action": rec.get("action"),
+            "grade": a.get("grade") if a else None,
+            "confidence": rec.get("confidence"),
+            "entry_price": rec.get("entry_price"),
+            "stop_price": rec.get("stop_price"),
+            "active": self.active,
+            "screen_timeframes": self.screen_timeframes,
+        }
+
     def stop(self):
         """Stop tracking this asset."""
         self.active = False

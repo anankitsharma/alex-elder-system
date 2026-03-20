@@ -15,6 +15,8 @@ import {
   type HealthResponse,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useTradingStore } from "@/store/useTradingStore";
+import CommandCenterGrid from "./CommandCenterGrid";
 import {
   Wallet,
   TrendingUp,
@@ -42,6 +44,7 @@ interface Props {
   candles: CandleData[];
   indicators: IndicatorData | null;
   onNavigate: (view: string) => void;
+  onAssetSelect?: (symbol: string, exchange: string) => void;
 }
 
 /* ── helpers ───────────────────────────────────────── */
@@ -141,7 +144,11 @@ export default function DashboardView({
   candles,
   indicators,
   onNavigate,
+  onAssetSelect,
 }: Props) {
+  /* command center from store */
+  const commandCenterAssets = useTradingStore((s) => s.commandCenterAssets);
+
   /* state */
   const [funds, setFunds] = useState<Record<string, unknown> | null>(null);
   const [positions, setPositions] = useState<Record<string, unknown>[]>([]);
@@ -332,6 +339,14 @@ export default function DashboardView({
             delay={160}
           />
         </div>
+
+        {/* ── command center ─────────────────────────── */}
+        <Section title="Command Center — All Assets" action="View Charts" onAction={() => onNavigate("charts")} delay={200}>
+          <CommandCenterGrid
+            assets={commandCenterAssets}
+            onSelectAsset={(sym, exch) => { if (onAssetSelect) onAssetSelect(sym, exch); }}
+          />
+        </Section>
 
         {/* ── positions + orders ────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

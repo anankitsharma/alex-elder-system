@@ -323,6 +323,14 @@ async def get_pipeline_status():
     return await pipeline_manager.get_status()
 
 
+@router.get("/pipeline/command-center")
+async def get_command_center():
+    """Compact summary of all active sessions for the dashboard command center."""
+    from app.pipeline import pipeline_manager
+    summaries = pipeline_manager.get_all_summaries()
+    return {"assets": summaries, "count": len(summaries)}
+
+
 @router.get("/pipeline/signals")
 async def get_pipeline_signals(limit: int = Query(20, ge=1, le=100)):
     """Get recent signals from DB."""

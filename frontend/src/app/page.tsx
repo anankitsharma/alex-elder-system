@@ -49,10 +49,14 @@ export default function Dashboard() {
 
   const handleSymbolChange = (sym: string, exch: string) => {
     setAsset(sym, exch);
-    // Also tell pipeline to track the new symbol via WebSocket
     if (wsManager) {
       wsManager.trackSymbol(sym, exch);
     }
+  };
+
+  const handleAssetSelect = (sym: string, exch: string) => {
+    handleSymbolChange(sym, exch);
+    setView("charts");
   };
 
   return (
@@ -76,6 +80,7 @@ export default function Dashboard() {
               candles={candles}
               indicators={indicators}
               onNavigate={(v) => setView(v as ViewId)}
+              onAssetSelect={handleAssetSelect}
             />
           </ErrorBoundary>
         )}

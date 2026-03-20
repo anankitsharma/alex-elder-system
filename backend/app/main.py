@@ -116,30 +116,42 @@ async def lifespan(app: FastAPI):
             feed_thread.start()
             logger.info("Market feed WebSocket starting in background thread")
 
-            # Auto-start default pipeline and subscribe on feed after a delay
-            # (feed needs time to connect before we can subscribe)
+            # Auto-start all tracked instruments with rate limiting
             async def _auto_start_pipeline():
                 await asyncio.sleep(5)  # Wait for feed to connect
                 try:
                     from app.broker.instruments import download_scrip_master, lookup_token
+                    from app.config import TRACKED_INSTRUMENTS
                     scrip_df = await download_scrip_master()
 
-                    # Start NIFTY pipeline and subscribe on feed
-                    for sym, exch in [("NIFTY", "NFO")]:
+                    tokens_by_exchange: dict[str, list[str]] = {}
+                    started = 0
+
+                    for sym, exch in TRACKED_INSTRUMENTS:
                         try:
-                            session = await pipeline_manager.start_tracking(sym, exch)
+                            await pipeline_manager.start_tracking(sym, exch)
                             token = lookup_token(scrip_df, sym, exch)
-                            if token and market_feed.is_connected:
-                                market_feed.subscribe([token], exch)
-                                logger.info("Auto-subscribed {}:{} token={} on feed", sym, exch, token)
-                                # Telegram feed notification
-                                try:
-                                    from app.notifications.telegram import notify_feed_status
-                                    await notify_feed_status(True, f"{sym}:{exch}")
-                                except Exception:
-                                    pass
+                            if token:
+                                tokens_by_exchange.setdefault(exch, []).append(token)
+                            started += 1
+                            await asyncio.sleep(3)  # Rate limit Angel One historical API
                         except Exception as e:
-                            logger.warning("Auto-start {} failed: {}", sym, e)
+                            logger.warning("Auto-start {}:{} failed: {}", sym, exch, e)
+
+                    # Batch subscribe per exchange on feed
+                    for exch, tokens in tokens_by_exchange.items():
+                        if tokens and market_feed.is_connected:
+                            market_feed.subscribe(tokens, exch)
+                            logger.info("Feed subscribed {} tokens on {}", len(tokens), exch)
+
+                    logger.info("Auto-started {}/{} pipelines", started, len(TRACKED_INSTRUMENTS))
+
+                    # Telegram notification
+                    try:
+                        from app.notifications.telegram import notify_feed_status
+                        await notify_feed_status(True, f"{started} instruments")
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.warning("Auto pipeline start failed: {}", e)
 

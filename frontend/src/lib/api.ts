@@ -244,6 +244,32 @@ export function fetchIndicators(
   return apiFetch<IndicatorResponse>(url);
 }
 
+// ── Command Center ──────────────────────────────────────────
+export interface CommandCenterAsset {
+  symbol: string;
+  exchange: string;
+  ltp: number | null;
+  prev_close: number | null;
+  change_pct: number | null;
+  tide: string | null;
+  ema_trend: string | null;
+  impulse: string | null;
+  wave_signal: string | null;
+  action: string | null;
+  grade: string | null;
+  confidence: number | null;
+  entry_price: number | null;
+  stop_price: number | null;
+  active: boolean;
+  screen_timeframes: Record<string, string>;
+}
+
+export function fetchCommandCenter() {
+  return apiFetch<{ assets: CommandCenterAsset[]; count: number }>(
+    "/api/strategy/pipeline/command-center"
+  );
+}
+
 // ── Health ──────────────────────────────────────────────────
 export interface HealthResponse {
   status: string;
