@@ -234,6 +234,16 @@ async def _heartbeat_loop():
             except Exception:
                 pass
 
+        # ── Contract rollover check (every 30 min) ──
+        if not hasattr(_heartbeat_loop, '_last_rollover_check'):
+            _heartbeat_loop._last_rollover_check = 0.0
+        if now - _heartbeat_loop._last_rollover_check >= 1800:  # 30 min
+            _heartbeat_loop._last_rollover_check = now
+            try:
+                await pipeline_manager.check_and_rollover()
+            except Exception:
+                pass
+
         await asyncio.sleep(0.05)  # 50ms poll cycle
 
 

@@ -123,6 +123,116 @@ class PipelineManager:
         """Compact summaries for all active sessions (command center)."""
         return [s.get_summary() for s in self._sessions.values() if s.active]
 
+    def get_contract_status(self) -> list[dict]:
+        """Contract expiry status for all active sessions."""
+        from datetime import datetime
+        results = []
+        for key, session in self._sessions.items():
+            if not session.active:
+                continue
+            days = None
+            if session.expiry_date:
+                days = (session.expiry_date - datetime.now()).days
+
+            threshold = 15 if session.exchange == "MCX" else 7
+            status = "OK"
+            if days is not None:
+                if days <= 0:
+                    status = "EXPIRED"
+                elif days <= threshold:
+                    status = "ROLLOVER_NEEDED"
+                elif days <= threshold * 2:
+                    status = "WARNING"
+
+            results.append({
+                "symbol": session.symbol,
+                "exchange": session.exchange,
+                "token": session.token,
+                "contract": session.contract_symbol,
+                "expiry_date": session.expiry_date.strftime("%Y-%m-%d") if session.expiry_date else None,
+                "days_to_expiry": days,
+                "status": status,
+                "threshold": threshold,
+            })
+        return results
+
+    async def check_and_rollover(self):
+        """Check all sessions for expiry and auto-rollover if needed."""
+        from datetime import datetime
+        contracts = self.get_contract_status()
+        for c in contracts:
+            if c["status"] in ("ROLLOVER_NEEDED", "EXPIRED"):
+                sym, exch = c["symbol"], c["exchange"]
+                logger.warning("Contract rollover needed: {}:{} ({}d left, contract={})",
+                              sym, exch, c["days_to_expiry"], c["contract"])
+                try:
+                    await self._do_rollover(sym, exch)
+                except Exception as e:
+                    logger.error("Rollover failed for {}:{}: {}", sym, exch, e)
+
+    async def _do_rollover(self, symbol: str, exchange: str):
+        """Execute rollover: close positions, stop old session, start new one."""
+        key = f"{symbol}:{exchange}"
+        old_session = self._sessions.get(key)
+        if not old_session:
+            return
+
+        old_token = old_session.token
+        old_contract = old_session.contract_symbol
+
+        # 1. Close any open positions on old contract
+        try:
+            from app.database import async_session
+            from app.pipeline import db_persistence as db
+            async with async_session() as dbsession:
+                positions = await db.load_open_positions_by_symbol(dbsession, symbol)
+                for pos in positions:
+                    ltp = None
+                    screen2_tf = old_session.screen_timeframes.get("2", "1d")
+                    df = old_session.candle_buffers.get(screen2_tf)
+                    if df is not None and not df.empty:
+                        ltp = float(df.iloc[-1].get("close", 0))
+                    if ltp and ltp > 0:
+                        await db.close_position(dbsession, pos.id, ltp)
+                        logger.info("Rollover: closed {} {} @ {}", pos.direction, symbol, ltp)
+        except Exception as e:
+            logger.warning("Rollover position close failed: {}", e)
+
+        # 2. Stop old session
+        await self.stop_tracking(symbol, exchange)
+
+        # 3. Resolve new token
+        new_token = await self._resolve_token(symbol, exchange)
+        if not new_token or new_token == old_token:
+            logger.error("Rollover: no new contract found for {}:{}", symbol, exchange)
+            return
+
+        # 4. Start new session
+        new_session = await self.start_tracking(symbol, exchange)
+
+        # 5. Subscribe new token on feed
+        try:
+            from app.broker.websocket_feed import market_feed
+            if market_feed.is_connected:
+                market_feed.subscribe([new_token], exchange)
+        except Exception:
+            pass
+
+        # 6. Notify
+        logger.info("ROLLOVER COMPLETE: {}:{} {} -> {} (new token={})",
+                    symbol, exchange, old_contract, new_session.contract_symbol, new_token)
+        try:
+            from app.notifications.telegram import _send
+            await _send(
+                f"🔄 <b>CONTRACT ROLLOVER: {symbol}</b>\n\n"
+                f"Old: {old_contract} (token {old_token})\n"
+                f"New: {new_session.contract_symbol} (token {new_token})\n"
+                f"Expiry: {new_session.expiry_date.strftime('%Y-%m-%d') if new_session.expiry_date else '?'}\n"
+                f"Days left: {new_session.days_to_expiry}"
+            )
+        except Exception:
+            pass
+
     async def shutdown(self):
         """Shut down all sessions."""
         for key in list(self._sessions.keys()):

@@ -270,6 +270,9 @@ export interface CommandCenterAsset {
     direction: string | null;
     description: string;
   } | null;
+  contract: string | null;
+  expiry_date: string | null;
+  days_to_expiry: number | null;
 }
 
 export interface AssetDetailResponse {

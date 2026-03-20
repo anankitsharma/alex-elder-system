@@ -29,6 +29,9 @@ class AssetSession:
         self.token = token
         self.instrument_id: Optional[int] = None
         self.active = False
+        self.contract_symbol: Optional[str] = None  # e.g. "NIFTY30MAR26FUT"
+        self.expiry_date: Optional[datetime] = None  # Contract expiry
+        self.days_to_expiry: Optional[int] = None
 
         # Candle buffers per timeframe: "1d" -> DataFrame
         self.candle_buffers: dict[str, pd.DataFrame] = {}
@@ -72,6 +75,9 @@ class AssetSession:
             )
             self.instrument_id = inst.id
 
+        # Resolve contract expiry from scrip master
+        await self._resolve_expiry()
+
         # Determine screen timeframes based on asset class
         await self._resolve_timeframes()
 
@@ -111,6 +117,25 @@ class AssetSession:
         )
 
         await self._broadcast_event("pipeline_status", self.get_status())
+
+    async def _resolve_expiry(self):
+        """Resolve contract symbol and expiry date from scrip master."""
+        try:
+            from app.broker.instruments import download_scrip_master
+            scrip_df = await download_scrip_master()
+            match = scrip_df[scrip_df["token"] == self.token]
+            if not match.empty:
+                row = match.iloc[0]
+                self.contract_symbol = row.get("symbol", "")
+                expiry_str = row.get("expiry", "")
+                if expiry_str:
+                    self.expiry_date = datetime.strptime(str(expiry_str), "%d%b%Y")
+                    self.days_to_expiry = (self.expiry_date - datetime.now()).days
+                    logger.info("Contract: {} expiry={} ({}d left)",
+                                self.contract_symbol, self.expiry_date.strftime("%Y-%m-%d"),
+                                self.days_to_expiry)
+        except Exception as e:
+            logger.warning("Expiry resolution failed for {}: {}", self.symbol, e)
 
     async def _resolve_timeframes(self):
         """Get screen timeframes from timeframe_config."""
@@ -948,6 +973,9 @@ class AssetSession:
             "active": self.active,
             "screen_timeframes": self.screen_timeframes,
             "alignment": self.alignment,
+            "contract": self.contract_symbol,
+            "expiry_date": self.expiry_date.strftime("%Y-%m-%d") if self.expiry_date else None,
+            "days_to_expiry": (self.expiry_date - datetime.now()).days if self.expiry_date else None,
         }
 
     def stop(self):

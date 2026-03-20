@@ -416,6 +416,13 @@ async def get_asset_detail(
     }
 
 
+@router.get("/pipeline/contracts")
+async def get_contracts():
+    """Contract expiry status for all tracked instruments."""
+    from app.pipeline import pipeline_manager
+    return {"contracts": pipeline_manager.get_contract_status()}
+
+
 @router.get("/pipeline/command-center")
 async def get_command_center():
     """Compact summary of all active sessions for the dashboard command center."""

@@ -81,6 +81,7 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
             <th className="text-center py-1.5 px-2 font-medium">Signal</th>
             <th className="text-center py-1.5 px-2 font-medium">Grade</th>
             <th className="text-right py-1.5 px-2 font-medium">Conf</th>
+            <th className="text-center py-1.5 px-2 font-medium">Expiry</th>
             <th className="text-right py-1.5 px-2 font-medium">Entry</th>
             <th className="text-right py-1.5 px-2 font-medium">Stop</th>
           </tr>
@@ -162,6 +163,19 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
                       </div>
                       <span className="text-muted w-6 text-right">{a.confidence}%</span>
                     </div>
+                  ) : "—"}
+                </td>
+
+                {/* Expiry */}
+                <td className="text-center py-2 px-2 text-[9px]">
+                  {a.days_to_expiry != null ? (
+                    <span className={cn(
+                      "font-mono",
+                      a.days_to_expiry <= 7 ? "text-red-400 font-bold" :
+                      a.days_to_expiry <= 15 ? "text-amber-400" : "text-muted"
+                    )}>
+                      {a.days_to_expiry}d
+                    </span>
                   ) : "—"}
                 </td>
 
