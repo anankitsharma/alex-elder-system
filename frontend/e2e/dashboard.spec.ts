@@ -347,6 +347,7 @@ test.describe("Dashboard UI", () => {
 // ─── Integration Tests ──────────────────────────────────────────────
 
 test.describe("Frontend-Backend Integration", () => {
+  test.beforeEach(async ({ page }) => { await loginAsAdmin(page); });
   test("health status indicator turns green", async ({ page }) => {
     await page.goto("/");
     await waitForDashboardReady(page);
@@ -374,6 +375,7 @@ test.describe("Frontend-Backend Integration", () => {
 // ─── Production Safety Tests ─────────────────────────────────────────
 
 test.describe("Production Safety", () => {
+  test.beforeEach(async ({ page }) => { await loginAsAdmin(page); });
   test("order validation rejects negative quantity", async ({ request }) => {
     const res = await request.post(`${API}/api/trading/order`, {
       data: {
@@ -829,6 +831,7 @@ test.describe("Advanced Indicators API", () => {
 // ─── Phase 3: Risk Panel UI Tests ───────────────────────────────────
 
 test.describe("Risk Panel UI", () => {
+  test.beforeEach(async ({ page }) => { await loginAsAdmin(page); });
   test("Risk view is accessible via sidebar", async ({ page }) => {
     await page.goto("/");
     await goToRisk(page);
@@ -896,6 +899,7 @@ test.describe("Risk Panel UI", () => {
 // ─── Phase 3: Elder-Ray Chart UI Tests ──────────────────────────────
 
 test.describe("Elder-Ray Chart UI", () => {
+  test.beforeEach(async ({ page }) => { await loginAsAdmin(page); });
   test("Elder-Ray chart renders below MACD", async ({ page }) => {
     await page.goto("/");
     await goToCharts(page);
@@ -972,6 +976,7 @@ test.describe("Pipeline API", () => {
 // ─── Pipeline Status Bar UI ─────────────────────────────────────────
 
 test.describe("Pipeline Status Bar", () => {
+  test.beforeEach(async ({ page }) => { await loginAsAdmin(page); });
   test("pipeline status bar shows data freshness", async ({ page }) => {
     await page.goto("/");
     // PipelineStatusBar should show freshness indicator
