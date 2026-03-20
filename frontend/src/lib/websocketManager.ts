@@ -33,6 +33,10 @@ export class WebSocketManager {
   private disconnectedSince: number | null = null;
   private destroyed = false;
 
+  // Running bar batching (requestAnimationFrame)
+  private pendingRunningBar: CandleData | null = null;
+  private rafScheduled = false;
+
   // Track what symbol we're subscribed to for resubscribe on reconnect
   private trackedSymbol: string | null = null;
   private trackedExchange: string | null = null;
@@ -184,20 +188,22 @@ export class WebSocketManager {
             volume: bar.volume as number,
           };
 
-          // Throttle: only update store for each timeframe at most every 500ms
-          const now = Date.now();
-          const throttleKey = `rb_${timeframe}`;
-          const lastUpdate = (this as any)[throttleKey] || 0;
-          if (now - lastUpdate < 500) break; // Skip this update
-          (this as any)[throttleKey] = now;
-
-          // Update main store running bar if matching interval
+          // Buffer running bar and flush once per animation frame (~16ms)
+          // This replaces the 500ms throttle for much lower latency
           if (timeframe === store.interval) {
-            store.updateRunningBar(candleData);
+            this.pendingRunningBar = candleData;
+            if (!this.rafScheduled) {
+              this.rafScheduled = true;
+              requestAnimationFrame(() => {
+                if (this.pendingRunningBar) {
+                  useTradingStore.getState().updateRunningBar(this.pendingRunningBar);
+                  useTradingStore.getState().incrementTick();
+                  this.pendingRunningBar = null;
+                }
+                this.rafScheduled = false;
+              });
+            }
           }
-
-          // Tick activity
-          store.incrementTick();
         }
         break;
       }

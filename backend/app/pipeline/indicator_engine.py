@@ -37,6 +37,8 @@ class IndicatorEngine:
     def __init__(self, symbol: str = "UNKNOWN", interval: str = "1d"):
         self.symbol = symbol
         self.interval = interval
+        self._cache_key: str = ""  # hash of last candle count + last close
+        self._cache_result: dict = {}
 
     def _ensure_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Ensure DataFrame has 'datetime' column."""
@@ -72,6 +74,12 @@ class IndicatorEngine:
             return {}
 
         n = len(df)
+
+        # Cache: skip full recalc if data hasn't changed
+        last_close = float(df.iloc[-1].get("close", 0)) if n > 0 else 0
+        cache_key = f"{n}:{last_close}:{screen}"
+        if cache_key == self._cache_key and self._cache_result:
+            return self._cache_result
         sym = self.symbol
         iv = self.interval
         result = {}
@@ -278,4 +286,7 @@ class IndicatorEngine:
         else:
             result["macd_divergence_signal"] = [None] * n
 
+        # Cache result
+        self._cache_key = cache_key
+        self._cache_result = result
         return result

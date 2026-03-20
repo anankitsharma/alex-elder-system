@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Sidebar, type ViewId } from "@/components/layout/Sidebar";
 import { SymbolBar } from "@/components/layout/SymbolBar";
 import { ThreeScreenView } from "@/components/chart/ThreeScreenView";
@@ -59,6 +59,37 @@ export default function Dashboard() {
     handleSymbolChange(sym, exch);
     setView("asset-detail");
   };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      switch (e.key) {
+        case "1": setView("dashboard"); break;
+        case "2": setView("charts"); break;
+        case "3": setView("trades"); break;
+        case "4": setView("signals"); break;
+        case "5": setView("risk"); break;
+        case "6": setView("portfolio"); break;
+        case "Escape":
+          if (view === "asset-detail") setView("dashboard");
+          break;
+      }
+
+      // Timeframe shortcuts (only on charts view)
+      if (view === "charts") {
+        const tfMap: Record<string, string> = { "F1": "1m", "F2": "5m", "F3": "15m", "F4": "1h", "F5": "1d", "F6": "1w" };
+        if (tfMap[e.key]) {
+          e.preventDefault();
+          setIntervalStore(tfMap[e.key]);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [view, setIntervalStore]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
