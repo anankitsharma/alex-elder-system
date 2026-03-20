@@ -104,6 +104,7 @@ export default function ElderRayChart({
       chart.remove();
       chartRef.current = null;
       seriesRefs.current = {};
+      lastErCountRef.current = 0;
     };
   }, [height, theme]);
 

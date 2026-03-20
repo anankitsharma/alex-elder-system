@@ -366,6 +366,7 @@ export default function TradingViewChart({
       chartsRef.current = [];
       seriesRef.current = {};
       priceLineRef.current = null;
+      prevCandleCountRef.current = 0; // Reset so data effect re-runs after chart recreation
     };
   }, [buildCharts]);
 

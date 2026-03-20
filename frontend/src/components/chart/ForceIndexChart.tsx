@@ -123,6 +123,7 @@ export default function ForceIndexChart({
       chart.remove();
       chartRef.current = null;
       seriesRefs.current = {};
+      lastFiCountRef.current = 0;
     };
   }, [height, !!forceIndex2, !!forceIndex13, theme]);
 

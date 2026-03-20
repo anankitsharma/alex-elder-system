@@ -161,6 +161,7 @@ export function CandlestickChart({
       chart.remove();
       chartRef.current = null;
       seriesRefs.current = {};
+      lastSetCountRef.current = 0; // Reset so data effect re-runs after chart recreation
     };
   }, [height, showVolume, theme]);
 

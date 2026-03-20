@@ -110,6 +110,7 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
       chart.remove();
       chartRef.current = null;
       seriesRefs.current = {};
+      lastMacdCountRef.current = 0;
     };
   }, [height, theme]);
 
