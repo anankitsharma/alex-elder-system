@@ -272,6 +272,37 @@ export interface CommandCenterAsset {
   } | null;
 }
 
+export interface AssetDetailResponse {
+  symbol: string;
+  exchange: string;
+  lot_size: number;
+  lot_value: number | null;
+  summary: CommandCenterAsset | null;
+  analysis: any | null;
+  alignment: any | null;
+  sizing: {
+    equity: number;
+    risk_pct: number;
+    entry_price: number | null;
+    stop_price: number | null;
+    risk_per_share: number | null;
+    max_risk_amount: number;
+    raw_shares: number;
+    lots: number;
+    adjusted_shares: number;
+    position_value: number | null;
+  };
+  signals: any[];
+  orders: any[];
+  positions: any[];
+}
+
+export function fetchAssetDetail(symbol: string, exchange: string) {
+  return apiFetch<AssetDetailResponse>(
+    `/api/strategy/pipeline/asset-detail/${encodeURIComponent(symbol)}?exchange=${exchange}`
+  );
+}
+
 export function fetchCommandCenter() {
   return apiFetch<{ assets: CommandCenterAsset[]; count: number }>(
     "/api/strategy/pipeline/command-center"

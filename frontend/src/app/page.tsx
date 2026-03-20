@@ -14,6 +14,7 @@ import RiskPanel from "@/components/panels/RiskPanel";
 import SignalPanel from "@/components/panels/SignalPanel";
 import DashboardView from "@/components/views/DashboardView";
 import SettingsView from "@/components/views/SettingsView";
+import AssetDetailView from "@/components/views/AssetDetailView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PipelineStatusBar } from "@/components/layout/PipelineStatusBar";
 import { ToastContainer } from "@/components/ui/ToastContainer";
@@ -56,7 +57,7 @@ export default function Dashboard() {
 
   const handleAssetSelect = (sym: string, exch: string) => {
     handleSymbolChange(sym, exch);
-    setView("charts");
+    setView("asset-detail");
   };
 
   return (
@@ -250,6 +251,18 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+        )}
+
+        {/* ═══════ Asset Detail ═══════════════════════════════ */}
+        {view === "asset-detail" && (
+          <ErrorBoundary label="Asset Detail">
+            <AssetDetailView
+              symbol={symbol}
+              exchange={exchange}
+              onBack={() => setView("dashboard")}
+              onNavigate={(v) => setView(v as ViewId)}
+            />
+          </ErrorBoundary>
         )}
 
         {/* ═══════ Settings ════════════════════════════════════ */}

@@ -14,7 +14,7 @@ import {
   Moon,
 } from "lucide-react";
 
-export type ViewId = "dashboard" | "charts" | "trades" | "signals" | "risk" | "portfolio" | "settings";
+export type ViewId = "dashboard" | "charts" | "trades" | "signals" | "risk" | "portfolio" | "settings" | "asset-detail";
 
 const NAV: { id: ViewId; icon: typeof LayoutDashboard; label: string }[] = [
   { id: "dashboard", icon: LayoutDashboard, label: "Overview" },

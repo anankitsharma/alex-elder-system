@@ -397,3 +397,60 @@ async def load_month_trades(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+# ── Asset Detail Queries ─────────────────────────────────────
+
+async def load_orders_by_symbol(
+    session: AsyncSession, symbol: str, limit: int = 50,
+) -> list[dict]:
+    """Load orders for a symbol, newest first."""
+    stmt = (
+        select(Order)
+        .where(Order.symbol == symbol)
+        .order_by(Order.created_at.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [{
+        "id": r.id,
+        "order_id": r.order_id,
+        "symbol": r.symbol,
+        "direction": r.direction,
+        "order_type": r.order_type,
+        "quantity": r.quantity,
+        "price": r.price,
+        "filled_price": r.filled_price,
+        "filled_quantity": r.filled_quantity,
+        "status": r.status,
+        "mode": r.mode,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in result.scalars().all()]
+
+
+async def load_positions_by_symbol(
+    session: AsyncSession, symbol: str, limit: int = 50,
+) -> list[dict]:
+    """Load positions for a symbol, newest first."""
+    stmt = (
+        select(Position)
+        .where(Position.symbol == symbol)
+        .order_by(Position.created_at.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [{
+        "id": r.id,
+        "symbol": r.symbol,
+        "direction": r.direction,
+        "entry_price": r.entry_price,
+        "quantity": r.quantity,
+        "stop_price": r.stop_price,
+        "current_price": r.current_price,
+        "unrealized_pnl": r.unrealized_pnl,
+        "risk_amount": r.risk_amount,
+        "status": r.status,
+        "mode": r.mode,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "closed_at": r.closed_at.isoformat() if hasattr(r, 'closed_at') and r.closed_at else None,
+    } for r in result.scalars().all()]

@@ -323,6 +323,97 @@ async def get_pipeline_status():
     return await pipeline_manager.get_status()
 
 
+@router.get("/pipeline/asset-detail/{symbol}")
+async def get_asset_detail(
+    symbol: str,
+    exchange: str = Query("NFO"),
+):
+    """Consolidated asset detail: signals, orders, positions, analysis, lot size."""
+    from app.pipeline import pipeline_manager
+    from app.database import async_session
+    from app.pipeline import db_persistence as db
+
+    # Get pipeline session summary
+    session_obj = pipeline_manager.get_session(symbol, exchange)
+    summary = session_obj.get_summary() if session_obj else None
+    analysis = session_obj.latest_analysis if session_obj else None
+    alignment = session_obj.alignment if session_obj else None
+
+    # Get instrument info + lot size
+    instrument_id = None
+    lot_size = 1
+    async with async_session() as dbsession:
+        from sqlalchemy import select
+        from app.models.market import Instrument
+        stmt = select(Instrument).where(
+            Instrument.symbol == symbol,
+            Instrument.exchange == exchange,
+        )
+        result = await dbsession.execute(stmt)
+        inst = result.scalar_one_or_none()
+        if inst:
+            instrument_id = inst.id
+            lot_size = getattr(inst, "lot_size", 1) or 1
+
+    # If lot_size is 1 for F&O, try scrip master
+    if lot_size <= 1 and exchange in ("NFO", "MCX"):
+        try:
+            from app.broker.instruments import download_scrip_master, lookup_token
+            scrip_df = await download_scrip_master()
+            match = scrip_df[scrip_df["symbol"].str.contains(symbol, case=False, na=False)]
+            if not match.empty and "lotsize" in match.columns:
+                ls = int(match.iloc[0].get("lotsize", 1))
+                if ls > 0:
+                    lot_size = ls
+        except Exception:
+            pass
+
+    # DB queries
+    signals = []
+    orders = []
+    positions = []
+    async with async_session() as dbsession:
+        if instrument_id:
+            signals = await db.load_recent_signals(dbsession, instrument_id, limit=30)
+        orders = await db.load_orders_by_symbol(dbsession, symbol, limit=30)
+        positions = await db.load_positions_by_symbol(dbsession, symbol, limit=30)
+
+    # Position sizing defaults
+    ltp = summary.get("ltp") if summary else None
+    entry = summary.get("entry_price") if summary else None
+    stop = summary.get("stop_price") if summary else None
+    risk_per_share = abs(entry - stop) if entry and stop else None
+    max_risk_amount = 100000 * 0.02  # 2% of 1L
+    raw_shares = int(max_risk_amount / risk_per_share) if risk_per_share and risk_per_share > 0 else 0
+    lots = raw_shares // lot_size if lot_size > 0 else raw_shares
+    adjusted_shares = lots * lot_size
+
+    return {
+        "symbol": symbol,
+        "exchange": exchange,
+        "lot_size": lot_size,
+        "lot_value": round(lot_size * ltp, 2) if ltp else None,
+        "summary": summary,
+        "analysis": analysis,
+        "alignment": alignment,
+        "sizing": {
+            "equity": 100000,
+            "risk_pct": 2.0,
+            "entry_price": entry,
+            "stop_price": stop,
+            "risk_per_share": round(risk_per_share, 2) if risk_per_share else None,
+            "max_risk_amount": round(max_risk_amount, 2),
+            "raw_shares": raw_shares,
+            "lots": lots,
+            "adjusted_shares": adjusted_shares,
+            "position_value": round(adjusted_shares * entry, 2) if entry else None,
+        },
+        "signals": signals,
+        "orders": orders,
+        "positions": positions,
+    }
+
+
 @router.get("/pipeline/command-center")
 async def get_command_center():
     """Compact summary of all active sessions for the dashboard command center."""
