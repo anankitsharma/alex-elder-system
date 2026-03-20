@@ -361,6 +361,12 @@ class AssetSession:
             grade = analysis.get("grade", "D")
 
             if action != "WAIT" and confidence >= settings.min_signal_score:
+                # Telegram alert for actionable signal
+                try:
+                    from app.notifications.telegram import notify_signal
+                    await notify_signal(self.symbol, analysis)
+                except Exception:
+                    pass
                 await self._process_signal(analysis)
 
             await self._broadcast_event("signal", {
@@ -404,6 +410,16 @@ class AssetSession:
         try:
             from app.risk.circuit_breaker import CircuitBreaker
             cb = CircuitBreaker({"max_portfolio_risk_pct": settings.max_portfolio_risk_pct})
+
+            # Check for pending circuit breaker halt notification
+            if hasattr(cb, '_pending_halt_notification') and cb._pending_halt_notification:
+                reason, pct = cb._pending_halt_notification
+                cb._pending_halt_notification = None
+                try:
+                    from app.notifications.telegram import notify_circuit_breaker
+                    await notify_circuit_breaker(reason, pct)
+                except Exception:
+                    pass
 
             if entry_price and stop_price:
                 risk_per_share = abs(entry_price - stop_price)
@@ -505,6 +521,16 @@ class AssetSession:
                 "Auto-executed: {} {} x{} @ {:.2f} stop={:.2f}",
                 direction, self.symbol, shares, entry, stop,
             )
+
+            # Telegram trade notification
+            try:
+                from app.notifications.telegram import notify_trade
+                await notify_trade(
+                    self.symbol, direction, shares, entry, stop,
+                    order.order_id, "PAPER", analysis.get("grade", "?"),
+                )
+            except Exception:
+                pass
 
             await self._broadcast_event("order", {
                 "symbol": self.symbol,

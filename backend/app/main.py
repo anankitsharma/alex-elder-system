@@ -132,6 +132,12 @@ async def lifespan(app: FastAPI):
                             if token and market_feed.is_connected:
                                 market_feed.subscribe([token], exch)
                                 logger.info("Auto-subscribed {}:{} token={} on feed", sym, exch, token)
+                                # Telegram feed notification
+                                try:
+                                    from app.notifications.telegram import notify_feed_status
+                                    await notify_feed_status(True, f"{sym}:{exch}")
+                                except Exception:
+                                    pass
                         except Exception as e:
                             logger.warning("Auto-start {} failed: {}", sym, e)
                 except Exception as e:
@@ -146,6 +152,14 @@ async def lifespan(app: FastAPI):
         logger.error("Angel One login error: {} — running in offline mode", e)
 
     logger.info("Elder Trading System ready at http://localhost:8000")
+
+    # Telegram startup notification
+    try:
+        from app.notifications.telegram import notify_system_start
+        await notify_system_start()
+    except Exception:
+        pass
+
     yield
 
     # Shutdown — graceful

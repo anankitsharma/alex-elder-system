@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # Telegram
     telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
     # App settings
     db_url: str = "sqlite+aiosqlite:///./elder_trading.db"

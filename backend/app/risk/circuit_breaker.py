@@ -249,3 +249,5 @@ class CircuitBreaker:
                 "CIRCUIT BREAKER TRIGGERED: {} | Equity: {} | Exposure: {:.2f}%",
                 self.halt_reason, self.month_start_equity, pct,
             )
+            # Flag for async telegram notification
+            self._pending_halt_notification = (self.halt_reason, pct)
