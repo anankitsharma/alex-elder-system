@@ -128,15 +128,21 @@ async def lifespan(app: FastAPI):
                     started = 0
 
                     for sym, exch in TRACKED_INSTRUMENTS:
-                        try:
-                            await pipeline_manager.start_tracking(sym, exch)
-                            token = lookup_token(scrip_df, sym, exch)
-                            if token:
-                                tokens_by_exchange.setdefault(exch, []).append(token)
-                            started += 1
-                            await asyncio.sleep(3)  # Rate limit Angel One historical API
-                        except Exception as e:
-                            logger.warning("Auto-start {}:{} failed: {}", sym, exch, e)
+                        for attempt in range(2):  # Retry once on failure
+                            try:
+                                await pipeline_manager.start_tracking(sym, exch)
+                                token = lookup_token(scrip_df, sym, exch)
+                                if token:
+                                    tokens_by_exchange.setdefault(exch, []).append(token)
+                                started += 1
+                                break
+                            except Exception as e:
+                                if attempt == 0:
+                                    logger.warning("Auto-start {}:{} failed (retrying in 10s): {}", sym, exch, e)
+                                    await asyncio.sleep(10)
+                                else:
+                                    logger.warning("Auto-start {}:{} failed permanently: {}", sym, exch, e)
+                        await asyncio.sleep(5)  # Rate limit between instruments
 
                     # Batch subscribe per exchange on feed
                     for exch, tokens in tokens_by_exchange.items():

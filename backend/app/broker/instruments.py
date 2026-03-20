@@ -93,9 +93,10 @@ def lookup_token(df: pd.DataFrame, symbol: str, exchange: str = "NSE") -> str | 
             return None
         return str(match.iloc[0]["token"])
 
-    # Select best futures contract: earliest expiry >= 7 days from now
+    # Select best futures contract: earliest expiry with enough days left
+    # MCX metals need more buffer (near-expiry contracts have price distortion)
     today = datetime.now()
-    min_expiry_days = 7
+    min_expiry_days = 15 if exchange == "MCX" else 7
     best = None
 
     for _, row in match.iterrows():
