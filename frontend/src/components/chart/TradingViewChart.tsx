@@ -304,11 +304,13 @@ export default function TradingViewChart({
         syncingRef.current = true;
         charts.forEach((other, oidx) => {
           if (oidx !== idx && seriesForChart[oidx]) {
-            if (param.time) {
-              other.setCrosshairPosition(NaN, param.time, seriesForChart[oidx]);
-            } else {
-              other.clearCrosshairPosition();
-            }
+            try {
+              if (param.time) {
+                other.setCrosshairPosition(NaN, param.time, seriesForChart[oidx]);
+              } else {
+                other.clearCrosshairPosition();
+              }
+            } catch { /* series may not have data yet */ }
           }
         });
         syncingRef.current = false;

@@ -184,15 +184,19 @@ export class WebSocketManager {
             volume: bar.volume as number,
           };
 
-          // Update per-timeframe screen data
-          store.setScreenRunningBar(timeframe, candleData);
+          // Throttle: only update store for each timeframe at most every 500ms
+          const now = Date.now();
+          const throttleKey = `rb_${timeframe}`;
+          const lastUpdate = (this as any)[throttleKey] || 0;
+          if (now - lastUpdate < 500) break; // Skip this update
+          (this as any)[throttleKey] = now;
 
           // Update main store running bar if matching interval
           if (timeframe === store.interval) {
             store.updateRunningBar(candleData);
           }
 
-          // Tick activity — running_bar fires on every tick
+          // Tick activity
           store.incrementTick();
         }
         break;
