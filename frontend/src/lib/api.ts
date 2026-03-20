@@ -262,6 +262,14 @@ export interface CommandCenterAsset {
   stop_price: number | null;
   active: boolean;
   screen_timeframes: Record<string, string>;
+  alignment: {
+    screen1: boolean;
+    screen2: boolean;
+    screen3: boolean;
+    level: number;
+    direction: string | null;
+    description: string;
+  } | null;
 }
 
 export function fetchCommandCenter() {

@@ -22,6 +22,33 @@ const TIDE_COLORS: Record<string, string> = {
   NEUTRAL: "text-muted",
 };
 
+const LEVEL_COLORS: Record<number, string> = {
+  0: "bg-surface-2",
+  1: "bg-amber-500/30",
+  2: "bg-orange-500/40",
+  3: "bg-green-500/50",
+};
+
+const LEVEL_BORDER: Record<number, string> = {
+  0: "",
+  1: "border-l-2 border-l-amber-500/50",
+  2: "border-l-2 border-l-orange-500/60",
+  3: "border-l-2 border-l-green-500 animate-pulse",
+};
+
+function AlignmentDots({ alignment }: { alignment: CommandCenterAsset["alignment"] }) {
+  if (!alignment) return <span className="text-muted">—</span>;
+  const { screen1, screen2, screen3, level } = alignment;
+  return (
+    <div className="flex items-center gap-1" title={alignment.description}>
+      <span className={cn("w-2 h-2 rounded-full", screen1 ? "bg-green-500" : "bg-surface-2 border border-border")} />
+      <span className={cn("w-2 h-2 rounded-full", screen2 ? "bg-green-500" : "bg-surface-2 border border-border")} />
+      <span className={cn("w-2 h-2 rounded-full", screen3 ? "bg-green-500" : "bg-surface-2 border border-border")} />
+      {level === 3 && <span className="text-[8px] text-green-400 font-bold ml-0.5">FULL</span>}
+    </div>
+  );
+}
+
 export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
   if (assets.length === 0) {
     return (
@@ -32,6 +59,14 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
     );
   }
 
+  // Sort: full alignment first, then by level desc, then alphabetically
+  const sorted = [...assets].sort((a, b) => {
+    const la = a.alignment?.level ?? 0;
+    const lb = b.alignment?.level ?? 0;
+    if (lb !== la) return lb - la;
+    return a.symbol.localeCompare(b.symbol);
+  });
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-[11px]">
@@ -40,8 +75,9 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
             <th className="text-left py-1.5 px-2 font-medium">Symbol</th>
             <th className="text-right py-1.5 px-2 font-medium">LTP</th>
             <th className="text-right py-1.5 px-2 font-medium">Chg%</th>
+            <th className="text-center py-1.5 px-2 font-medium">Screens</th>
             <th className="text-center py-1.5 px-2 font-medium">Tide</th>
-            <th className="text-center py-1.5 px-2 font-medium">Impulse</th>
+            <th className="text-center py-1.5 px-2 font-medium">Wave</th>
             <th className="text-center py-1.5 px-2 font-medium">Signal</th>
             <th className="text-center py-1.5 px-2 font-medium">Grade</th>
             <th className="text-right py-1.5 px-2 font-medium">Conf</th>
@@ -50,15 +86,20 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
           </tr>
         </thead>
         <tbody>
-          {assets.map((a) => {
+          {sorted.map((a) => {
             const isUp = (a.change_pct ?? 0) >= 0;
             const actionColor = a.action === "BUY" ? "text-green-400" : a.action === "SELL" ? "text-red-400" : "text-muted";
+            const level = a.alignment?.level ?? 0;
 
             return (
               <tr
                 key={`${a.symbol}:${a.exchange}`}
                 onClick={() => onSelectAsset(a.symbol, a.exchange)}
-                className="border-b border-border/50 hover:bg-surface-2 cursor-pointer transition-colors"
+                className={cn(
+                  "border-b border-border/50 hover:bg-surface-2 cursor-pointer transition-colors",
+                  LEVEL_BORDER[level],
+                  level === 3 && "bg-green-500/5",
+                )}
               >
                 {/* Symbol */}
                 <td className="py-2 px-2">
@@ -70,7 +111,7 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
 
                 {/* LTP */}
                 <td className="text-right py-2 px-2 font-mono text-foreground">
-                  {a.ltp ? `${a.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
+                  {a.ltp ? a.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}
                 </td>
 
                 {/* Change % */}
@@ -78,20 +119,21 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
                   {a.change_pct != null ? `${isUp ? "+" : ""}${a.change_pct.toFixed(2)}%` : "—"}
                 </td>
 
+                {/* Alignment dots */}
+                <td className="text-center py-2 px-2">
+                  <AlignmentDots alignment={a.alignment} />
+                </td>
+
                 {/* Tide */}
-                <td className={cn("text-center py-2 px-2 font-semibold", TIDE_COLORS[a.tide ?? ""] ?? "text-muted")}>
+                <td className={cn("text-center py-2 px-2 font-semibold text-[10px]", TIDE_COLORS[a.tide ?? ""] ?? "text-muted")}>
                   {a.tide ?? "—"}
                 </td>
 
-                {/* Impulse */}
-                <td className="text-center py-2 px-2">
-                  {a.impulse ? (
-                    <span className={cn(
-                      "inline-block w-2 h-2 rounded-full",
-                      a.impulse === "bullish" ? "bg-green-500" :
-                      a.impulse === "bearish" ? "bg-red-500" : "bg-blue-500"
-                    )} />
-                  ) : "—"}
+                {/* Wave */}
+                <td className={cn("text-center py-2 px-2 text-[10px]",
+                  a.wave_signal === "BUY" ? "text-green-400" : a.wave_signal === "SELL" ? "text-red-400" : "text-muted"
+                )}>
+                  {a.wave_signal ?? "—"}
                 </td>
 
                 {/* Signal/Action */}

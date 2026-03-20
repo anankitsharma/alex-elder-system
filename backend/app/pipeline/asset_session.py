@@ -45,6 +45,13 @@ class AssetSession:
         # Track last processed signal to avoid duplicates
         self._last_signal_key: Optional[str] = None
 
+        # Alignment tracking for progressive alerts
+        self._prev_alignment_level: int = 0
+        self.alignment: dict = {
+            "screen1": False, "screen2": False, "screen3": False,
+            "level": 0, "direction": None, "description": "No setup",
+        }
+
         # Indicator engines per timeframe
         self._engines: dict[str, IndicatorEngine] = {}
 
@@ -355,23 +362,92 @@ class AssetSession:
             analysis = ts.analyze(screen1, screen2, screen3)
             self.latest_analysis = analysis
 
-            # Check if actionable signal
-            action = analysis.get("recommendation", {}).get("action", "WAIT")
-            confidence = analysis.get("recommendation", {}).get("confidence", 0)
+            # ── Compute screen alignment ──
+            s1_data = analysis.get("screen1", {})
+            s2_data = analysis.get("screen2", {})
+            rec = analysis.get("recommendation", {})
+            tide = s1_data.get("tide")
+            wave = s2_data.get("signal")
+            action = rec.get("action", "WAIT")
+            confidence = rec.get("confidence", 0)
             grade = analysis.get("grade", "D")
 
-            if action != "WAIT" and confidence >= settings.min_signal_score:
-                # Telegram alert for actionable signal
+            # Screen 1 aligned = tide is clear (not neutral)
+            s1_aligned = tide in ("BULLISH", "BEARISH")
+            # Screen 2 aligned = wave signal matches tide direction
+            s2_aligned = (
+                (tide == "BULLISH" and wave == "BUY") or
+                (tide == "BEARISH" and wave == "SELL")
+            )
+            # Screen 3 aligned = actionable signal with entry/stop
+            s3_aligned = action != "WAIT" and confidence >= settings.min_signal_score
+
+            level = int(s1_aligned) + int(s2_aligned) + int(s3_aligned)
+            direction = "LONG" if tide == "BULLISH" else "SHORT" if tide == "BEARISH" else None
+
+            descs = {
+                0: "No setup",
+                1: f"Tide {tide}" if s1_aligned else "No setup",
+                2: f"Tide + Wave aligned ({direction})",
+                3: f"FULL ALIGNMENT — {direction} ({grade})",
+            }
+
+            self.alignment = {
+                "screen1": s1_aligned,
+                "screen2": s2_aligned,
+                "screen3": s3_aligned,
+                "level": level,
+                "direction": direction,
+                "description": descs.get(level, "No setup"),
+                "tide": tide,
+                "wave": wave,
+                "action": action,
+                "grade": grade,
+                "confidence": confidence,
+            }
+
+            # ── Progressive alignment alerts ──
+            prev_level = self._prev_alignment_level
+            if level > prev_level:
                 try:
-                    from app.notifications.telegram import notify_signal
-                    await notify_signal(self.symbol, analysis)
+                    from app.notifications.telegram import _send
+                    if level == 1 and prev_level == 0:
+                        await _send(
+                            f"📊 <b>{self.symbol}</b> — Screen 1 aligned\n"
+                            f"Tide: <b>{tide}</b> | Direction: {direction}\n"
+                            f"Watching for Screen 2 confirmation..."
+                        )
+                    elif level == 2:
+                        emoji = "🟢" if direction == "LONG" else "🔴"
+                        await _send(
+                            f"{emoji} <b>{self.symbol}</b> — Tide + Wave ALIGNED\n"
+                            f"Direction: <b>{direction}</b>\n"
+                            f"Tide: {tide} | Wave: {wave}\n"
+                            f"⏳ Waiting for entry trigger (Screen 3)..."
+                        )
+                    elif level == 3:
+                        emoji = "🟢" if direction == "LONG" else "🔴"
+                        entry = rec.get("entry_price", 0)
+                        stop = rec.get("stop_price", 0)
+                        await _send(
+                            f"🔥🔥🔥 <b>FULL ALIGNMENT: {action} {self.symbol}</b>\n\n"
+                            f"Grade: <b>{grade}</b> | Confidence: <b>{confidence}%</b>\n"
+                            f"Entry: ₹{entry:,.2f} | Stop: ₹{stop:,.2f}\n"
+                            f"Direction: <b>{direction}</b>\n\n"
+                            f"Mode: <b>{settings.trading_mode}</b>"
+                        )
                 except Exception:
                     pass
+            self._prev_alignment_level = level
+
+            # Auto-execute on full alignment
+            if s3_aligned:
                 await self._process_signal(analysis)
 
             await self._broadcast_event("signal", {
                 "symbol": self.symbol,
                 "analysis": analysis,
+                "alignment": self.alignment,
             })
 
         except Exception as e:
@@ -643,6 +719,7 @@ class AssetSession:
             "stop_price": rec.get("stop_price"),
             "active": self.active,
             "screen_timeframes": self.screen_timeframes,
+            "alignment": self.alignment,
         }
 
     def stop(self):
