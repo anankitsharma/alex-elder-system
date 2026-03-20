@@ -19,6 +19,7 @@ class PipelineManager:
         self._sessions: dict[str, AssetSession] = {}  # "RELIANCE:NSE" -> AssetSession
         self._token_map: dict[str, str] = {}  # token -> "RELIANCE:NSE"
         self._broadcast_fn: Optional[callable] = None
+        self._kill_switch_active: bool = False
 
     def set_broadcast(self, fn):
         """Set the broadcast function for pipeline events."""
@@ -256,6 +257,33 @@ class PipelineManager:
             )
         except Exception:
             pass
+
+    async def activate_kill_switch(self, reason: str = "Manual kill switch"):
+        """Emergency halt -- stop all trading immediately."""
+        self._kill_switch_active = True
+        logger.critical("KILL SWITCH ACTIVATED: {}", reason)
+        # Halt all sessions
+        for key, session in self._sessions.items():
+            session._kill_switch = True
+        # Notify
+        try:
+            from app.notifications.telegram import _send, Priority
+            await _send(
+                f"\U0001f6a8\U0001f6a8\U0001f6a8 <b>KILL SWITCH ACTIVATED</b>\n\nReason: {reason}\nAll trading halted.",
+                priority=Priority.CRITICAL,
+            )
+        except Exception:
+            pass
+
+    def deactivate_kill_switch(self):
+        """Deactivate kill switch -- resume normal operation."""
+        self._kill_switch_active = False
+        for key, session in self._sessions.items():
+            session._kill_switch = False
+        logger.info("Kill switch deactivated")
+
+    def is_kill_switch_active(self) -> bool:
+        return self._kill_switch_active
 
     async def shutdown(self):
         """Graceful shutdown: clean up DB state, then stop sessions.

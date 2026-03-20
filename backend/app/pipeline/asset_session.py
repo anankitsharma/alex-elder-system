@@ -290,6 +290,12 @@ class AssetSession:
             "max_portfolio_risk_pct": settings.max_portfolio_risk_pct,
         })
 
+        # Kill switch — set by PipelineManager to block all signal processing
+        self._kill_switch = False
+
+        # Candle counter for periodic reconciliation
+        self._candle_count: int = 0
+
         # Trade executor — unified state machine for trade lifecycle
         self._init_executor()
 
@@ -306,7 +312,7 @@ class AssetSession:
             from app.trading.live import LivePlacer
             placer = LivePlacer()
         else:
-            placer = PaperPlacer(slippage_pct=0.0)
+            placer = PaperPlacer(slippage_pct=settings.paper_slippage_pct)
         self.executor = TradeExecutor(placer, on_notify=self._on_executor_event)
 
     def _on_executor_event(self, event: str, data: dict):
@@ -401,6 +407,34 @@ class AssetSession:
 
         except Exception as e:
             logger.warning("State recovery failed for {}: {}", self.symbol, e)
+
+    async def _reconcile_state(self):
+        """Periodic check: compare executor in-memory state with DB positions.
+
+        Detects divergence (e.g., position closed in DB but still open in executor).
+        Logs warnings on mismatch — does NOT auto-fix (requires manual review).
+        """
+        try:
+            async with async_session() as session:
+                db_positions = await db.load_open_positions_by_symbol(session, self.symbol)
+
+            db_open_count = len(db_positions)
+            exec_pos = self.executor.get_position(self.symbol)
+            exec_has_open = exec_pos is not None and exec_pos.is_open if exec_pos else False
+
+            # Check for divergence
+            if db_open_count > 0 and not exec_has_open:
+                logger.warning(
+                    "STATE DIVERGENCE: {} has {} open positions in DB but executor shows none",
+                    self.symbol, db_open_count,
+                )
+            elif db_open_count == 0 and exec_has_open:
+                logger.warning(
+                    "STATE DIVERGENCE: {} executor has open position but DB shows none",
+                    self.symbol,
+                )
+        except Exception as e:
+            logger.debug("Reconciliation check failed for {}: {}", self.symbol, e)
 
     async def start(self):
         """Initialize session: resolve instrument, load history, compute indicators."""
@@ -674,6 +708,11 @@ class AssetSession:
 
         # Evaluate signals
         await self._evaluate_signals()
+
+        # Periodic state reconciliation (every 10 candles)
+        self._candle_count += 1
+        if self._candle_count % 10 == 0:
+            await self._reconcile_state()
 
     async def _check_stop_losses(self, current_price: float):
         """Check if any open position's stop or target has been hit. Close if so."""
@@ -1047,6 +1086,10 @@ class AssetSession:
 
     async def _process_signal(self, analysis: dict):
         """Process an actionable signal through risk gate and execution."""
+        if self._kill_switch:
+            logger.warning("Signal blocked — kill switch active for {}", self.symbol)
+            return
+
         rec = analysis["recommendation"]
         action = rec["action"]
         confidence = rec["confidence"]
@@ -1142,6 +1185,17 @@ class AssetSession:
                     logger.info("Signal rejected by position sizer: {}", sizing.get("reason"))
                     return
 
+                # Apply drawdown scaling — reduce position as portfolio heat increases
+                scale = self._circuit_breaker.get_position_scale()
+                if scale < 1.0 and sizing.get("shares", 0) > 0:
+                    original = sizing["shares"]
+                    sizing["shares"] = max(1, int(sizing["shares"] * scale))
+                    if sizing["shares"] != original:
+                        logger.info(
+                            "Drawdown scaling {}: {} → {} shares (scale={:.0%})",
+                            self.symbol, original, sizing["shares"], scale,
+                        )
+
                 # Check if this trade would breach 6% rule
                 trade_risk = sizing.get("risk_amount", 0)
                 if trade_risk > 0:
@@ -1184,6 +1238,46 @@ class AssetSession:
         else:
             logger.info("Signal {} skipped: zero shares from position sizer", signal.id)
 
+    def _validate_order(self, direction: str, quantity: int, price: float, stop: float) -> tuple:
+        """Pre-trade validation — independent sanity checks before order placement.
+
+        Returns (is_valid, reason).
+        Catches: absurd prices, oversized positions, zero/negative values.
+        Inspired by the Knight Capital incident — no order should reach the broker
+        without an independent sanity check.
+        """
+        # 1. Price must be positive and reasonable
+        if price <= 0:
+            return False, f"Invalid price: {price}"
+
+        # 2. Quantity must be positive
+        if quantity <= 0:
+            return False, f"Invalid quantity: {quantity}"
+
+        # 3. Stop must be positive and on correct side
+        if stop <= 0:
+            return False, f"Invalid stop: {stop}"
+        if direction == "BUY" and stop >= price:
+            return False, f"BUY stop {stop} >= entry {price}"
+        if direction == "SELL" and stop <= price:
+            return False, f"SELL stop {stop} <= entry {price}"
+
+        # 4. Risk per share must be reasonable (< 10% of price)
+        risk_pct = abs(price - stop) / price * 100
+        if risk_pct > 10:
+            return False, f"Risk per share {risk_pct:.1f}% exceeds 10% limit"
+
+        # 5. Max position value check (hard cap at 50 lakhs for safety)
+        position_value = quantity * price
+        if position_value > 5_000_000:  # 50 lakhs
+            return False, f"Position value ₹{position_value:,.0f} exceeds ₹50L hard cap"
+
+        # 6. Max quantity check (hard cap at 10,000 shares/lots)
+        if quantity > 10_000:
+            return False, f"Quantity {quantity} exceeds 10,000 hard cap"
+
+        return True, "OK"
+
     async def _auto_execute(self, signal, sizing: dict, analysis: dict):
         """Auto-execute trade via TradeExecutor (PAPER and LIVE modes)."""
         rec = analysis["recommendation"]
@@ -1195,6 +1289,36 @@ class AssetSession:
 
         if shares <= 0 or entry <= 0:
             return
+
+        # Pre-trade validation — independent sanity check (Knight Capital lesson)
+        is_valid, reason = self._validate_order(direction, shares, entry, stop)
+        if not is_valid:
+            logger.warning(
+                "Order REJECTED by pre-trade validation for {}: {}",
+                self.symbol, reason,
+            )
+            await self._broadcast_event("order_rejected", {
+                "symbol": self.symbol, "direction": direction,
+                "quantity": shares, "reason": f"Pre-trade validation: {reason}",
+            })
+            try:
+                from app.notifications.telegram import notify_order_rejected
+                await notify_order_rejected(
+                    symbol=self.symbol, direction=direction,
+                    quantity=shares, reason=f"Pre-trade validation: {reason}",
+                    mode=self.effective_trading_mode,
+                )
+            except Exception:
+                pass
+            return
+
+        # SEBI circular: Market orders prohibited for algorithmic trading from April 1, 2026.
+        # Use LIMIT orders with a small buffer to ensure fills while remaining compliant.
+        # BUY: limit price 0.2% above entry; SELL: limit price 0.2% below entry.
+        if direction == "BUY":
+            limit_price = round(entry * 1.002, 2)
+        else:
+            limit_price = round(entry * 0.998, 2)
 
         # Calculate target price (2:1 R:R by default)
         risk_per_share = abs(entry - stop) if stop > 0 else 0
@@ -1233,8 +1357,8 @@ class AssetSession:
                 exec_pos = await self.executor.enter(
                     symbol=self.symbol, token=self.token, exchange=self.exchange,
                     direction=pos_direction, quantity=shares,
-                    entry_price=entry, stop_price=stop, target_price=round(target, 2),
-                    order_type="MARKET", product_type="CARRYFORWARD",
+                    entry_price=limit_price, stop_price=stop, target_price=round(target, 2),
+                    order_type="LIMIT", product_type="CARRYFORWARD",
                 )
                 if exec_pos is not None:
                     break
@@ -1275,9 +1399,9 @@ class AssetSession:
                     "symbol": self.symbol,
                     "order_id": broker_order_id,
                     "direction": direction,
-                    "order_type": "MARKET",
+                    "order_type": "LIMIT",
                     "quantity": shares,
-                    "price": entry,
+                    "price": limit_price,
                     "status": order_status,
                     "mode": mode,
                     "filled_price": filled_price if order_status == "COMPLETE" else None,

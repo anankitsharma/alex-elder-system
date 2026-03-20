@@ -182,6 +182,34 @@ class CircuitBreaker:
         self.halt_timestamp = None
         logger.info("Circuit breaker halt reset")
 
+    def get_position_scale(self) -> float:
+        """Get position size scaling factor based on current drawdown.
+
+        Returns a multiplier (0.0 to 1.0) for position sizing:
+        - 0-3% exposure: 1.0 (full size)
+        - 3-4% exposure: 0.75 (reduce by 25%)
+        - 4-5% exposure: 0.50 (reduce by 50%)
+        - 5-6% exposure: 0.25 (reduce by 75%)
+        - 6%+: 0.0 (halted)
+        """
+        if self.month_start_equity <= 0:
+            return 1.0
+
+        open_risk = self._calculate_open_risk()
+        total = self.realized_losses + open_risk
+        exposure_pct = (total / self.month_start_equity) * 100.0
+
+        if exposure_pct >= self.max_portfolio_risk_pct:
+            return 0.0
+        elif exposure_pct >= self.max_portfolio_risk_pct * 0.83:  # 5%
+            return 0.25
+        elif exposure_pct >= self.max_portfolio_risk_pct * 0.67:  # 4%
+            return 0.50
+        elif exposure_pct >= self.max_portfolio_risk_pct * 0.50:  # 3%
+            return 0.75
+        else:
+            return 1.0
+
     def get_status(self) -> Dict[str, Any]:
         """Get full circuit breaker status."""
         return self.check_can_trade()

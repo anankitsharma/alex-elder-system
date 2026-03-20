@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     max_portfolio_risk_pct: float = 6.0
     min_signal_score: int = 65
     paper_starting_capital: float = 100000.0  # Default equity for PAPER mode
+    paper_slippage_pct: float = 0.1  # Simulated slippage for paper trading (%)
 
     # Anti-spam alert thresholds
     tide_dead_zone: float = 0.005       # MACD-H slope below this → NEUTRAL

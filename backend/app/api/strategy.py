@@ -285,6 +285,31 @@ async def get_risk_summary():
     }
 
 
+# ── Kill Switch Endpoints ──────────────────────────────────
+
+@router.post("/pipeline/kill-switch")
+async def activate_kill_switch(reason: str = Query("Manual activation")):
+    """Emergency halt — stop all order flow across all asset sessions."""
+    from app.pipeline import pipeline_manager
+    await pipeline_manager.activate_kill_switch(reason)
+    return {"status": "activated", "reason": reason}
+
+
+@router.post("/pipeline/kill-switch/deactivate")
+async def deactivate_kill_switch():
+    """Deactivate kill switch — resume normal trading operation."""
+    from app.pipeline import pipeline_manager
+    pipeline_manager.deactivate_kill_switch()
+    return {"status": "deactivated"}
+
+
+@router.get("/pipeline/kill-switch")
+async def get_kill_switch_status():
+    """Get current kill switch status."""
+    from app.pipeline import pipeline_manager
+    return {"active": pipeline_manager.is_kill_switch_active()}
+
+
 # ── Pipeline Endpoints ──────────────────────────────────────
 
 
