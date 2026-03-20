@@ -74,11 +74,18 @@ settings = Settings()
 
 # Multi-asset tracking list for F&O pipeline
 TRACKED_INSTRUMENTS = [
+    # NFO Index Futures
     ("NIFTY", "NFO"),
     ("BANKNIFTY", "NFO"),
+    ("FINNIFTY", "NFO"),
+    ("MIDCPNIFTY", "NFO"),
+    # MCX Metals
     ("GOLDM", "MCX"),
     ("SILVERM", "MCX"),
     ("COPPER", "MCX"),
     ("ALUMINIUM", "MCX"),
     ("ZINC", "MCX"),
+    # MCX Energy
+    ("NATGASMINI", "MCX"),
+    ("CRUDEOILM", "MCX"),
 ]
