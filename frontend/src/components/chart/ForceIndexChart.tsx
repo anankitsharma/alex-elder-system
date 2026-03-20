@@ -133,6 +133,7 @@ export default function ForceIndexChart({
     if (!timestamps.length) return;
     if (timestamps.length === lastFiCountRef.current) return;
     lastFiCountRef.current = timestamps.length;
+    try {
 
     const T = "rgba(0,0,0,0)";
 
@@ -158,6 +159,7 @@ export default function ForceIndexChart({
       chartRef.current?.timeScale().fitContent();
       if (chartRef.current) (chartRef.current as any).__fitted = true;
     }
+    } catch { /* setData conflict */ }
   }, [timestamps, forceIndex2, forceIndex13, height]);
 
   const hasData = forceIndex2?.some((v) => v != null) || forceIndex13?.some((v) => v != null);

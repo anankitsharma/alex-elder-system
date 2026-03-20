@@ -171,10 +171,10 @@ export function CandlestickChart({
     const refs = seriesRefs.current;
     if (!refs.candles || candles.length === 0) return;
 
+    try {
+
     const hasImpulse = indicators?.impulse_color && indicators.impulse_color.length > 0;
 
-    // Only call setData when candle count changes (initial load, new bar, symbol change)
-    // Skip when only indicators updated (same candle count)
     if (candles.length !== lastSetCountRef.current) {
       const candleData: CandlestickData[] = candles.map((c, i) => {
         const base: CandlestickData = {
@@ -238,6 +238,8 @@ export function CandlestickChart({
         });
       } catch { /* disposed */ }
     }
+
+    } catch { /* lightweight-charts setData conflict — safe to ignore */ }
   }, [candles, indicators, height, showVolume]);
 
   // Display legend

@@ -118,8 +118,8 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.histogram || !indicators || candles.length === 0) return;
-    // Only setData when candle count changes (not on indicator-only updates)
     if (candles.length === lastMacdCountRef.current) return;
+    try {
     lastMacdCountRef.current = candles.length;
 
     const T = "rgba(0,0,0,0)";
@@ -153,6 +153,7 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
       chartRef.current?.timeScale().fitContent();
       if (chartRef.current) (chartRef.current as any).__fitted = true;
     }
+    } catch { /* setData conflict — safe to ignore */ }
   }, [candles, indicators, height]);
 
   if (!indicators?.macd_histogram?.some((v) => v != null)) return null;

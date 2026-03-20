@@ -115,6 +115,7 @@ export default function ElderRayChart({
     if (!timestamps.length) return;
     if (timestamps.length === lastErCountRef.current) return;
     lastErCountRef.current = timestamps.length;
+    try {
 
     const T = "rgba(0,0,0,0)";
 
@@ -140,6 +141,7 @@ export default function ElderRayChart({
       chartRef.current?.timeScale().fitContent();
       if (chartRef.current) (chartRef.current as any).__fitted = true;
     }
+    } catch { /* setData conflict */ }
   }, [timestamps, bullPower, bearPower, height]);
 
   if (!bullPower?.some((v) => v != null)) return null;
