@@ -77,8 +77,6 @@ TRACKED_INSTRUMENTS = [
     # NFO Index Futures
     ("NIFTY", "NFO"),
     ("BANKNIFTY", "NFO"),
-    ("FINNIFTY", "NFO"),
-    ("MIDCPNIFTY", "NFO"),
     # MCX Metals
     ("GOLDM", "MCX"),
     ("SILVERM", "MCX"),
