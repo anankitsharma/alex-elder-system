@@ -17,6 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useTradingStore } from "@/store/useTradingStore";
 import CommandCenterGrid from "./CommandCenterGrid";
+import AssetStatusCards from "./AssetStatusCards";
 import {
   Wallet,
   TrendingUp,
@@ -343,6 +344,14 @@ export default function DashboardView({
         {/* ── command center ─────────────────────────── */}
         <Section title="Command Center — All Assets" action="View Charts" onAction={() => onNavigate("charts")} delay={200}>
           <CommandCenterGrid
+            assets={commandCenterAssets}
+            onSelectAsset={(sym, exch) => { if (onAssetSelect) onAssetSelect(sym, exch); }}
+          />
+        </Section>
+
+        {/* ── asset status cards ─────────────────────── */}
+        <Section title="Asset Status — Screen by Screen" action="Three Screen" onAction={() => onNavigate("charts")} delay={240}>
+          <AssetStatusCards
             assets={commandCenterAssets}
             onSelectAsset={(sym, exch) => { if (onAssetSelect) onAssetSelect(sym, exch); }}
           />
