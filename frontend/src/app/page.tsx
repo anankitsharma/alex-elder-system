@@ -19,7 +19,8 @@ import { PipelineStatusBar } from "@/components/layout/PipelineStatusBar";
 import { ToastContainer } from "@/components/ui/ToastContainer";
 import { useTradingStore } from "@/store/useTradingStore";
 import { usePipelineInit } from "@/hooks/usePipelineInit";
-import { useWebSocket } from "@/hooks/useWebSocket";
+// useWebSocket removed — caused 10/sec re-renders killing all charts
+// Pipeline WebSocket (usePipelineInit) handles live data now
 import { cn } from "@/lib/utils";
 import { BarChart3, LayoutGrid, Loader2 } from "lucide-react";
 
@@ -43,8 +44,8 @@ export default function Dashboard() {
   // Initialize pipeline (WebSocket, initial data, health polling)
   const { ready, wsManager } = usePipelineInit();
 
-  // Legacy WebSocket hook for raw ticks (used by WatchlistPanel)
-  const { ticks, connected } = useWebSocket();
+  // Pipeline WebSocket connection status from store
+  const wsConnected = useTradingStore((s) => s.pipelineWsConnected);
 
   const handleSymbolChange = (sym: string, exch: string) => {
     setAsset(sym, exch);
@@ -71,7 +72,7 @@ export default function Dashboard() {
             <DashboardView
               symbol={symbol}
               exchange={exchange}
-              wsConnected={connected}
+              wsConnected={wsConnected}
               candles={candles}
               indicators={indicators}
               onNavigate={(v) => setView(v as ViewId)}
@@ -238,7 +239,7 @@ export default function Dashboard() {
                 <div className="rounded-lg bg-surface border border-border overflow-hidden">
                   <PanelHeader title="Watchlist" />
                   <ErrorBoundary label="Watchlist">
-                    <WatchlistPanel ticks={ticks} onSelect={handleSymbolChange} />
+                    <WatchlistPanel ticks={{}} onSelect={handleSymbolChange} />
                   </ErrorBoundary>
                 </div>
               </div>
