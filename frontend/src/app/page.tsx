@@ -105,12 +105,8 @@ function LoginForm() {
   );
 }
 
-export default function Dashboard() {
-  const [view, setView] = useState<ViewId>("dashboard");
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [chartMode, setChartMode] = useState<ChartMode>("single");
-
-  // Auth state
+// Auth wrapper — renders LoginForm or Dashboard based on auth state
+export default function AuthGate() {
   const authLoading = useAuthStore((s) => s.loading);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const checkAuth = useAuthStore((s) => s.checkAuth);
@@ -118,6 +114,26 @@ export default function Dashboard() {
   useEffect(() => {
     checkAuth();
   }, [checkAuth]);
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-background">
+        <Loader2 className="w-6 h-6 text-muted animate-spin" />
+      </div>
+    );
+  }
+  if (!isAuthenticated) {
+    return <LoginForm />;
+  }
+
+  return <Dashboard />;
+}
+
+// Main dashboard — only mounted when authenticated (avoids hook ordering issues)
+function Dashboard() {
+  const [view, setView] = useState<ViewId>("dashboard");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [chartMode, setChartMode] = useState<ChartMode>("single");
 
   // Zustand store — asset, data, pipeline state
   const symbol = useTradingStore((s) => s.symbol);
@@ -135,18 +151,6 @@ export default function Dashboard() {
 
   // Pipeline WebSocket connection status from store
   const wsConnected = useTradingStore((s) => s.pipelineWsConnected);
-
-  // Auth gate — show loading spinner or login form
-  if (authLoading) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-background">
-        <Loader2 className="w-6 h-6 text-muted animate-spin" />
-      </div>
-    );
-  }
-  if (!isAuthenticated) {
-    return <LoginForm />;
-  }
 
   const handleSymbolChange = (sym: string, exch: string) => {
     setAsset(sym, exch);

@@ -9,6 +9,31 @@ import { Page, expect } from "@playwright/test";
 const API = "http://localhost:8000";
 
 /**
+ * Login as admin via the login form (or set token directly).
+ * Must be called before any page navigation that requires auth.
+ */
+export async function loginAsAdmin(page: Page) {
+  // Get JWT token via API
+  const res = await page.request.post(`${API}/api/auth/login`, {
+    form: { username: "admin", password: "admin123" },
+  });
+  if (!res.ok()) return;
+  const data = await res.json();
+  const token = data.access_token;
+
+  // Navigate to page, set token, then reload so app picks it up
+  await page.goto("/");
+  await page.evaluate((t) => {
+    localStorage.setItem("elder_token", t);
+  }, token);
+  await page.reload({ waitUntil: "networkidle" });
+
+  // Wait for auth to resolve — either we see the dashboard or we're still on login
+  // Give the React app a moment to read localStorage and call checkAuth
+  await page.waitForTimeout(2000);
+}
+
+/**
  * Wait for the dashboard overview to be fully ready:
  * - Health check responded
  * - Dashboard data loaded (funds, positions, risk)
@@ -51,7 +76,8 @@ export async function waitForChartReady(page: Page, timeout = 20000) {
  * Navigate to dashboard and wait for it to be interactive.
  */
 export async function goToDashboard(page: Page) {
-  await page.goto("/");
+  // Login first (multi-user auth)
+  await loginAsAdmin(page);
   await waitForDashboardReady(page);
 }
 

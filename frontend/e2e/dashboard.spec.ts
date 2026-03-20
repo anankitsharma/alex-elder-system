@@ -10,6 +10,7 @@ import {
   goToPortfolio,
   navigateToView,
   waitForRiskData,
+  loginAsAdmin,
 } from "./helpers";
 
 const API = "http://localhost:8000";
@@ -186,8 +187,12 @@ test.describe("Backend API", () => {
 // ─── Frontend UI Tests ──────────────────────────────────────────────
 
 test.describe("Dashboard UI", () => {
+  test.beforeEach(async ({ page }) => {
+    // Login before each UI test (multi-user auth)
+    await loginAsAdmin(page);
+  });
+
   test("page loads with correct title", async ({ page }) => {
-    await page.goto("/");
     await expect(page).toHaveTitle("Elder Trading System");
   });
 

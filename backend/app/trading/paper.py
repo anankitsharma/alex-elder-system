@@ -11,7 +11,10 @@ import uuid
 from datetime import datetime
 from loguru import logger
 
-from backend.app.trading.executor import OrderResult
+try:
+    from app.trading.executor import OrderResult
+except ImportError:
+    from backend.app.trading.executor import OrderResult
 
 
 class PaperPlacer:
