@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
                     started = 0
 
                     for sym, exch in TRACKED_INSTRUMENTS:
-                        for attempt in range(2):  # Retry once on failure
+                        for attempt in range(3):  # Up to 3 attempts
                             try:
                                 await pipeline_manager.start_tracking(sym, exch)
                                 token = lookup_token(scrip_df, sym, exch)
@@ -137,11 +137,12 @@ async def lifespan(app: FastAPI):
                                 started += 1
                                 break
                             except Exception as e:
-                                if attempt == 0:
-                                    logger.warning("Auto-start {}:{} failed (retrying in 10s): {}", sym, exch, e)
-                                    await asyncio.sleep(10)
+                                delay = 10 * (attempt + 1)  # 10s, 20s, 30s
+                                if attempt < 2:
+                                    logger.warning("Auto-start {}:{} attempt {} failed (retry in {}s): {}", sym, exch, attempt+1, delay, e)
+                                    await asyncio.sleep(delay)
                                 else:
-                                    logger.warning("Auto-start {}:{} failed permanently: {}", sym, exch, e)
+                                    logger.error("Auto-start {}:{} FAILED after 3 attempts: {}", sym, exch, e)
                         await asyncio.sleep(5)  # Rate limit between instruments
 
                     # Batch subscribe per exchange on feed
