@@ -28,6 +28,109 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function ActiveTradesSection({ positions, orders, ltp, lotSize }: { positions: any[]; orders: any[]; ltp: number; lotSize: number }) {
+  if (positions.length === 0) return null;
+
+  return (
+    <Section title={`Active Paper Trades (${positions.length})`}>
+      <div className="space-y-3">
+        {positions.map((pos: any, i: number) => {
+          const isLong = pos.direction === "LONG";
+          const entry = pos.entry_price ?? 0;
+          const qty = pos.quantity ?? 0;
+          const stop = pos.stop_price ?? 0;
+          const pnlPerShare = isLong ? ltp - entry : entry - ltp;
+          const totalPnl = pnlPerShare * qty;
+          const pnlPct = entry > 0 ? (pnlPerShare / entry) * 100 : 0;
+          const riskPerShare = Math.abs(entry - stop);
+          const totalRisk = riskPerShare * qty;
+          const lots = lotSize > 1 ? Math.round(qty / lotSize) : qty;
+          const isProfit = pnlPerShare >= 0;
+
+          // Find associated order
+          const order = orders.find((o: any) =>
+            o.direction === (isLong ? "BUY" : "SELL") && o.status === "COMPLETE" && Math.abs((o.filled_price ?? o.price ?? 0) - entry) < 1
+          );
+
+          return (
+            <div key={pos.id || i} className={cn(
+              "rounded-lg border p-4",
+              isProfit ? "border-green-500/30 bg-green-500/5" : "border-red-500/30 bg-red-500/5"
+            )}>
+              {/* Header */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className={cn("text-[12px] font-bold", isLong ? "text-green-400" : "text-red-400")}>
+                    {isLong ? "📈 LONG" : "📉 SHORT"}
+                  </span>
+                  <span className="text-[9px] text-muted px-1 py-0.5 rounded bg-surface-2">{pos.mode}</span>
+                  <span className="text-[9px] text-muted">{pos.created_at?.slice(0, 16).replace("T", " ")}</span>
+                </div>
+                <div className={cn("text-[14px] font-bold font-mono", isProfit ? "text-green-400" : "text-red-400")}>
+                  {isProfit ? "+" : ""}₹{totalPnl.toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  <span className="text-[10px] ml-1">({isProfit ? "+" : ""}{pnlPct.toFixed(2)}%)</span>
+                </div>
+              </div>
+
+              {/* Details grid */}
+              <div className="grid grid-cols-3 md:grid-cols-6 gap-3 text-[10px]">
+                <div>
+                  <div className="text-muted">Entry</div>
+                  <div className="font-mono text-foreground">₹{entry.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</div>
+                </div>
+                <div>
+                  <div className="text-muted">Current (LTP)</div>
+                  <div className="font-mono text-foreground">₹{ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</div>
+                </div>
+                <div>
+                  <div className="text-muted">Stop Loss</div>
+                  <div className="font-mono text-red-400">₹{stop.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</div>
+                </div>
+                <div>
+                  <div className="text-muted">Quantity</div>
+                  <div className="font-mono text-foreground">{qty}{lotSize > 1 ? ` (${lots} lot${lots !== 1 ? "s" : ""})` : ""}</div>
+                </div>
+                <div>
+                  <div className="text-muted">P&L / Share</div>
+                  <div className={cn("font-mono", isProfit ? "text-green-400" : "text-red-400")}>
+                    {isProfit ? "+" : ""}₹{pnlPerShare.toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted">Risk (total)</div>
+                  <div className="font-mono text-amber-400">₹{totalRisk.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</div>
+                </div>
+              </div>
+
+              {/* Risk:Reward bar */}
+              {riskPerShare > 0 && (
+                <div className="mt-3 pt-2 border-t border-border/30">
+                  <div className="flex items-center justify-between text-[9px] text-muted mb-1">
+                    <span>Stop</span>
+                    <span>Entry</span>
+                    <span>Current</span>
+                  </div>
+                  <div className="h-2 bg-surface-2 rounded-full overflow-hidden flex">
+                    {/* Risk zone (entry to stop) */}
+                    <div className="h-full bg-red-500/40" style={{ width: "33%" }} />
+                    {/* Current position */}
+                    <div className={cn("h-full", isProfit ? "bg-green-500/60" : "bg-red-500/60")}
+                      style={{ width: `${Math.min(67, Math.abs(pnlPerShare / riskPerShare) * 33)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted mt-1">
+                    R:R achieved: {(Math.abs(pnlPerShare) / riskPerShare).toFixed(1)}x
+                    {order?.order_id && <span className="ml-3">Order: {order.order_id}</span>}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
 function TradingPlanSection({ plan, symbol }: { plan: any; symbol: string }) {
   if (!plan) return null;
 
@@ -361,6 +464,14 @@ export default function AssetDetailView({ symbol, exchange, onBack, onNavigate }
             </div>
           )}
         </Section>
+
+        {/* ── Active Paper Trades ── */}
+        <ActiveTradesSection
+          positions={data.positions.filter((p: any) => p.status === "OPEN")}
+          orders={data.orders}
+          ltp={ltp ?? 0}
+          lotSize={data.lot_size}
+        />
 
         {/* ── Signal History ── */}
         <Section title={`Signal History (${data.signals.length})`}>
