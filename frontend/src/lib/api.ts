@@ -292,6 +292,7 @@ export interface AssetDetailResponse {
     adjusted_shares: number;
     position_value: number | null;
   };
+  trading_plan: any | null;
   signals: any[];
   orders: any[];
   positions: any[];

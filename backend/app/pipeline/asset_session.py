@@ -673,6 +673,124 @@ class AssetSession:
             ),
         }
 
+    def get_trading_plan(self) -> dict:
+        """Comprehensive trading plan with projected entries, stops, targets, P&L."""
+        plan: dict = {
+            "has_signal": False,
+            "projected_entry": None,
+            "projected_entry_type": None,
+            "entry_price": None,
+            "initial_stop": None,
+            "trailing_stop": None,
+            "targets": [],
+            "risk_reward": None,
+            "direction": None,
+            "status": "WATCHING",  # WATCHING / ENTRY_PENDING / IN_TRADE / COMPLETED
+        }
+
+        a = self.latest_analysis
+        al = self.alignment
+        if not a:
+            return plan
+
+        rec = a.get("recommendation", {})
+        s1 = a.get("screen1", {})
+        s3 = a.get("screen3", {})
+        tide = s1.get("tide")
+        action = rec.get("action", "WAIT")
+        entry = rec.get("entry_price")
+        stop = rec.get("stop_price")
+        grade = a.get("grade")
+
+        # Get current price
+        ltp = None
+        screen2_tf = self.screen_timeframes.get("2", "1d")
+        df = self.candle_buffers.get(screen2_tf, pd.DataFrame())
+        if not df.empty:
+            ltp = float(df.iloc[-1].get("close", 0))
+        for tf, builder in self.candle_builders.items():
+            bar = builder.running_bar
+            if bar and bar.get("close"):
+                ltp = bar["close"]
+                break
+
+        # Get SafeZone stops from indicators
+        ind2 = self.indicators.get(screen2_tf, {})
+        safezone_long = last_non_null(ind2.get("safezone_long", []))
+        safezone_short = last_non_null(ind2.get("safezone_short", []))
+
+        # Get previous bar high/low for entry calculation
+        screen3_tf = self.screen_timeframes.get("3", "15m")
+        df3 = self.candle_buffers.get(screen3_tf, pd.DataFrame())
+        prev_high = float(df3.iloc[-2].get("high", 0)) if df3 is not None and len(df3) >= 2 else None
+        prev_low = float(df3.iloc[-2].get("low", 0)) if df3 is not None and len(df3) >= 2 else None
+
+        plan["direction"] = "LONG" if tide == "BULLISH" else "SHORT" if tide == "BEARISH" else None
+
+        # ── Projected entry (when no actionable signal yet) ──
+        if action == "WAIT" and tide:
+            if tide == "BULLISH" and prev_high:
+                plan["projected_entry"] = prev_high
+                plan["projected_entry_type"] = "BUY_STOP"
+                plan["initial_stop"] = safezone_long
+                plan["status"] = "WATCHING"
+            elif tide == "BEARISH" and prev_low:
+                plan["projected_entry"] = prev_low
+                plan["projected_entry_type"] = "SELL_STOP"
+                plan["initial_stop"] = safezone_short
+                plan["status"] = "WATCHING"
+
+        # ── Active signal entry ──
+        if action != "WAIT" and entry and stop:
+            plan["has_signal"] = True
+            plan["entry_price"] = entry
+            plan["initial_stop"] = stop
+            plan["status"] = "ENTRY_PENDING"
+
+            # Trailing stop = current SafeZone (tightens as price moves)
+            if action == "BUY" and safezone_long:
+                plan["trailing_stop"] = safezone_long
+            elif action == "SELL" and safezone_short:
+                plan["trailing_stop"] = safezone_short
+
+        # ── Targets (risk:reward 1:1, 1:2, 1:3) ──
+        ent = plan.get("entry_price") or plan.get("projected_entry")
+        stp = plan.get("initial_stop")
+        if ent and stp and ent != stp:
+            risk = abs(ent - stp)
+            direction = plan["direction"]
+            targets = []
+            for rr in [1, 2, 3]:
+                if direction == "LONG":
+                    t = round(ent + risk * rr, 2)
+                elif direction == "SHORT":
+                    t = round(ent - risk * rr, 2)
+                else:
+                    t = None
+                if t:
+                    targets.append({"ratio": f"1:{rr}", "price": t, "reward": round(risk * rr, 2)})
+            plan["targets"] = targets
+            plan["risk_reward"] = f"Risk: {risk:.2f} per share"
+
+        # ── P&L if in trade (check open positions) ──
+        # This is simplified — real P&L comes from DB positions
+        if ltp and ent:
+            if plan["direction"] == "LONG":
+                plan["unrealized_pnl_per_share"] = round(ltp - ent, 2)
+            elif plan["direction"] == "SHORT":
+                plan["unrealized_pnl_per_share"] = round(ent - ltp, 2)
+
+        # Key levels summary
+        plan["key_levels"] = {
+            "ltp": ltp,
+            "safezone_long": safezone_long,
+            "safezone_short": safezone_short,
+            "prev_high": prev_high,
+            "prev_low": prev_low,
+        }
+
+        return plan
+
     def get_summary(self) -> dict:
         """Compact summary for command center dashboard."""
         ltp = None

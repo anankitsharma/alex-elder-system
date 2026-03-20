@@ -338,6 +338,7 @@ async def get_asset_detail(
     summary = session_obj.get_summary() if session_obj else None
     analysis = session_obj.latest_analysis if session_obj else None
     alignment = session_obj.alignment if session_obj else None
+    trading_plan = session_obj.get_trading_plan() if session_obj else None
 
     # Get instrument info + lot size
     instrument_id = None
@@ -396,6 +397,7 @@ async def get_asset_detail(
         "summary": summary,
         "analysis": analysis,
         "alignment": alignment,
+        "trading_plan": trading_plan,
         "sizing": {
             "equity": 100000,
             "risk_pct": 2.0,

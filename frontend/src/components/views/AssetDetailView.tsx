@@ -28,6 +28,161 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function TradingPlanSection({ plan, symbol }: { plan: any; symbol: string }) {
+  if (!plan) return null;
+
+  const dir = plan.direction;
+  const dirColor = dir === "LONG" ? "text-green-400" : dir === "SHORT" ? "text-red-400" : "text-muted";
+  const dirEmoji = dir === "LONG" ? "📈" : dir === "SHORT" ? "📉" : "⏸";
+
+  const statusColors: Record<string, string> = {
+    WATCHING: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+    ENTRY_PENDING: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    IN_TRADE: "bg-green-500/10 text-green-400 border-green-500/20",
+    COMPLETED: "bg-surface-2 text-muted border-border",
+  };
+
+  const entry = plan.entry_price || plan.projected_entry;
+  const isProjected = !plan.has_signal && plan.projected_entry;
+  const kl = plan.key_levels || {};
+
+  return (
+    <Section title={`Trading Plan — ${symbol}`}>
+      {/* Status + Direction */}
+      <div className="flex items-center gap-3 mb-4">
+        <span className={cn("px-2 py-1 rounded text-[10px] font-bold border", statusColors[plan.status] ?? "text-muted")}>
+          {plan.status}
+        </span>
+        <span className={cn("text-[13px] font-bold", dirColor)}>
+          {dirEmoji} {dir ?? "NO DIRECTION"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Left: Entry + Stops + Targets */}
+        <div className="space-y-3">
+          {/* Entry */}
+          <div className={cn("rounded-lg border p-3", isProjected ? "border-amber-500/30 bg-amber-500/5" : plan.has_signal ? "border-green-500/30 bg-green-500/5" : "border-border")}>
+            <div className="text-[10px] text-muted mb-1">
+              {isProjected ? "Projected Entry (next trigger)" : plan.has_signal ? "Signal Entry" : "Entry"}
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[16px] font-bold font-mono text-foreground">
+                  {entry ? `₹${entry.toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : "—"}
+                </span>
+                {plan.projected_entry_type && (
+                  <span className="ml-2 text-[9px] text-muted px-1 py-0.5 rounded bg-surface-2">
+                    {plan.projected_entry_type}
+                  </span>
+                )}
+              </div>
+              {isProjected && (
+                <span className="text-[9px] text-amber-400">
+                  Will trigger when Screen 3 confirms
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Stops */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3">
+              <div className="text-[10px] text-muted mb-1">Initial Stop Loss</div>
+              <div className="text-[14px] font-bold font-mono text-red-400">
+                {plan.initial_stop ? `₹${plan.initial_stop.toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : "—"}
+              </div>
+              <div className="text-[9px] text-muted mt-1">SafeZone calculated</div>
+            </div>
+            <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 p-3">
+              <div className="text-[10px] text-muted mb-1">Trailing Stop (current)</div>
+              <div className="text-[14px] font-bold font-mono text-orange-400">
+                {plan.trailing_stop ? `₹${plan.trailing_stop.toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : plan.initial_stop ? `₹${plan.initial_stop.toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : "—"}
+              </div>
+              <div className="text-[9px] text-muted mt-1">Updates with SafeZone each bar</div>
+            </div>
+          </div>
+
+          {/* P&L */}
+          {plan.unrealized_pnl_per_share != null && entry && (
+            <div className={cn("rounded-lg border p-3", plan.unrealized_pnl_per_share >= 0 ? "border-green-500/20 bg-green-500/5" : "border-red-500/20 bg-red-500/5")}>
+              <div className="text-[10px] text-muted mb-1">Unrealized P&L (per share)</div>
+              <div className={cn("text-[16px] font-bold font-mono", plan.unrealized_pnl_per_share >= 0 ? "text-green-400" : "text-red-400")}>
+                {plan.unrealized_pnl_per_share >= 0 ? "+" : ""}₹{plan.unrealized_pnl_per_share.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+              </div>
+              <div className="text-[9px] text-muted mt-1">
+                LTP: ₹{kl.ltp?.toLocaleString("en-IN", { minimumFractionDigits: 2 })} vs Entry: ₹{entry?.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Targets + Key Levels */}
+        <div className="space-y-3">
+          {/* Targets */}
+          {plan.targets && plan.targets.length > 0 && (
+            <div className="rounded-lg border border-border p-3">
+              <div className="text-[10px] text-muted mb-2">Targets (Risk:Reward)</div>
+              <div className="space-y-2">
+                {plan.targets.map((t: any) => (
+                  <div key={t.ratio} className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted">{t.ratio}</span>
+                    <div className="flex-1 mx-2 h-1 bg-surface-2 rounded-full overflow-hidden">
+                      <div className="h-full bg-green-500/60 rounded-full" style={{ width: `${Math.min(100, parseInt(t.ratio.split(":")[1]) * 33)}%` }} />
+                    </div>
+                    <span className="font-mono text-[11px] text-green-400">₹{t.price.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                    <span className="text-[9px] text-muted ml-2">+₹{t.reward.toFixed(0)}</span>
+                  </div>
+                ))}
+              </div>
+              {plan.risk_reward && (
+                <div className="mt-2 pt-2 border-t border-border/50 text-[10px] text-muted">{plan.risk_reward}</div>
+              )}
+            </div>
+          )}
+
+          {/* Key Levels */}
+          <div className="rounded-lg border border-border p-3">
+            <div className="text-[10px] text-muted mb-2">Key Levels</div>
+            <div className="space-y-1.5 text-[11px]">
+              {kl.ltp && (
+                <div className="flex justify-between">
+                  <span className="text-muted">LTP</span>
+                  <span className="font-mono text-foreground">₹{kl.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                </div>
+              )}
+              {kl.prev_high && (
+                <div className="flex justify-between">
+                  <span className="text-muted">Prev High</span>
+                  <span className="font-mono text-green-400/70">₹{kl.prev_high.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                </div>
+              )}
+              {kl.prev_low && (
+                <div className="flex justify-between">
+                  <span className="text-muted">Prev Low</span>
+                  <span className="font-mono text-red-400/70">₹{kl.prev_low.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                </div>
+              )}
+              {kl.safezone_long && (
+                <div className="flex justify-between">
+                  <span className="text-muted">SafeZone Long</span>
+                  <span className="font-mono text-green-400/50">₹{kl.safezone_long.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                </div>
+              )}
+              {kl.safezone_short && (
+                <div className="flex justify-between">
+                  <span className="text-muted">SafeZone Short</span>
+                  <span className="font-mono text-red-400/50">₹{kl.safezone_short.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 export default function AssetDetailView({ symbol, exchange, onBack, onNavigate }: Props) {
   const [data, setData] = useState<AssetDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,6 +267,9 @@ export default function AssetDetailView({ symbol, exchange, onBack, onNavigate }
       </div>
 
       <div className="flex-1 overflow-auto p-5 space-y-4 max-w-[1400px] mx-auto w-full">
+
+        {/* ── Trading Plan ── */}
+        {data.trading_plan && <TradingPlanSection plan={data.trading_plan} symbol={symbol} />}
 
         {/* ── Position Sizing Calculator ── */}
         <Section title="Position Sizing — Elder's 2% Rule">
