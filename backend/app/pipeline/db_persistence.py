@@ -16,6 +16,7 @@ from app.database import async_session
 from app.models.market import Instrument, Candle, RolloverHistory
 from app.models.trade import Order, Position, Trade
 from app.models.signal import Signal
+from app.models.config import PortfolioRisk
 
 
 # ── Instruments ──────────────────────────────────────────────
@@ -224,6 +225,7 @@ async def save_signal(session: AsyncSession, signal_data: dict) -> Signal:
         confirmations = json.dumps(confirmations)
 
     sig = Signal(
+        user_id=signal_data.get("user_id"),
         instrument_id=signal_data["instrument_id"],
         symbol=signal_data["symbol"],
         timestamp=signal_data.get("timestamp", datetime.utcnow()),
@@ -277,6 +279,7 @@ async def load_recent_signals(
 async def save_order(session: AsyncSession, order_data: dict) -> Order:
     """Persist an order to DB."""
     order = Order(
+        user_id=order_data.get("user_id"),
         signal_id=order_data.get("signal_id"),
         instrument_id=order_data["instrument_id"],
         symbol=order_data["symbol"],
@@ -302,6 +305,7 @@ async def save_order(session: AsyncSession, order_data: dict) -> Order:
 async def save_position(session: AsyncSession, position_data: dict) -> Position:
     """Persist a position to DB."""
     pos = Position(
+        user_id=position_data.get("user_id"),
         instrument_id=position_data["instrument_id"],
         symbol=position_data["symbol"],
         direction=position_data["direction"],
@@ -328,46 +332,62 @@ async def close_position(
     exit_price: float,
     exit_time: Optional[datetime] = None,
 ) -> Optional[Trade]:
-    """Close a position and create a trade record."""
-    stmt = select(Position).where(Position.id == position_id)
-    result = await session.execute(stmt)
-    pos = result.scalar_one_or_none()
+    """Close a position and create a trade record atomically.
 
-    if pos is None or pos.status == "CLOSED":
-        return None
+    Uses a single transaction: position update + trade insert commit together.
+    If anything fails, both are rolled back. Also uses optimistic check:
+    only updates if status is still OPEN (prevents double-close race).
+    """
+    try:
+        stmt = select(Position).where(
+            and_(Position.id == position_id, Position.status == "OPEN")
+        )
+        result = await session.execute(stmt)
+        pos = result.scalar_one_or_none()
 
-    pos.status = "CLOSED"
-    pos.closed_at = exit_time or datetime.utcnow()
-    pos.current_price = exit_price
+        if pos is None:
+            return None  # Already closed or doesn't exist
 
-    # Calculate PnL
-    if pos.direction == "LONG":
-        pnl = (exit_price - pos.entry_price) * pos.quantity
-    else:
-        pnl = (pos.entry_price - exit_price) * pos.quantity
+        pos.status = "CLOSED"
+        pos.closed_at = exit_time or datetime.utcnow()
+        pos.current_price = exit_price
 
-    pnl_pct = (pnl / (pos.entry_price * pos.quantity)) * 100.0 if pos.entry_price > 0 else 0.0
+        # Calculate PnL
+        if pos.direction == "LONG":
+            pnl = (exit_price - pos.entry_price) * pos.quantity
+        else:
+            pnl = (pos.entry_price - exit_price) * pos.quantity
 
-    trade = Trade(
-        position_id=pos.id,
-        instrument_id=pos.instrument_id,
-        symbol=pos.symbol,
-        direction=pos.direction,
-        entry_price=pos.entry_price,
-        exit_price=exit_price,
-        quantity=pos.quantity,
-        pnl=round(pnl, 2),
-        pnl_percent=round(pnl_pct, 2),
-        mode=pos.mode,
-        entry_time=pos.opened_at,
-        exit_time=pos.closed_at,
-    )
-    session.add(trade)
-    await session.commit()
-    await session.refresh(trade)
+        pnl_pct = (pnl / (pos.entry_price * pos.quantity)) * 100.0 if pos.entry_price > 0 else 0.0
 
-    logger.info("Closed position {} → trade {} PnL={:.2f}", position_id, trade.id, pnl)
-    return trade
+        trade = Trade(
+            user_id=pos.user_id,
+            position_id=pos.id,
+            instrument_id=pos.instrument_id,
+            symbol=pos.symbol,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            quantity=pos.quantity,
+            pnl=round(pnl, 2),
+            pnl_percent=round(pnl_pct, 2),
+            mode=pos.mode,
+            entry_time=pos.opened_at,
+            exit_time=pos.closed_at,
+        )
+        session.add(trade)
+
+        # Atomic commit: position update + trade insert together
+        await session.commit()
+        await session.refresh(trade)
+
+        logger.info("Closed position {} → trade {} PnL={:.2f}", position_id, trade.id, pnl)
+        return trade
+
+    except Exception as e:
+        await session.rollback()
+        logger.error("Failed to close position {}: {}", position_id, e)
+        raise
 
 
 async def load_open_positions(
@@ -463,6 +483,70 @@ async def load_orders_by_symbol(
     } for r in result.scalars().all()]
 
 
+async def load_pending_orders(session: AsyncSession) -> list[Order]:
+    """Load PENDING orders (for live fill polling). Limited to 100 to prevent OOM."""
+    stmt = (
+        select(Order)
+        .where(Order.status == "PENDING")
+        .order_by(Order.created_at.desc())
+        .limit(100)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+# Valid order status transitions (FSM)
+_ORDER_TRANSITIONS = {
+    "PENDING": {"COMPLETE", "REJECTED", "CANCELLED"},
+    "COMPLETE": set(),       # Terminal state
+    "REJECTED": set(),       # Terminal state
+    "CANCELLED": set(),      # Terminal state
+}
+
+
+async def update_order_fill(
+    session: AsyncSession,
+    order_id: int,
+    filled_price: float = None,
+    filled_quantity: int = None,
+    status: str = "COMPLETE",
+) -> None:
+    """Update an order with fill information from broker.
+
+    Validates status transitions and filled_quantity <= order.quantity.
+    """
+    stmt = select(Order).where(Order.id == order_id)
+    result = await session.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        return
+
+    # Validate status transition
+    allowed = _ORDER_TRANSITIONS.get(order.status, set())
+    if status != order.status and status not in allowed:
+        logger.warning(
+            "Invalid order status transition: {} → {} (order {})",
+            order.status, status, order_id,
+        )
+        return
+
+    # Validate filled quantity doesn't exceed order quantity
+    if filled_quantity is not None and order.quantity:
+        if filled_quantity > order.quantity:
+            logger.warning(
+                "Filled quantity {} exceeds order quantity {} (order {})",
+                filled_quantity, order.quantity, order_id,
+            )
+            filled_quantity = order.quantity
+
+    order.status = status
+    if filled_price is not None:
+        order.filled_price = filled_price
+    if filled_quantity is not None:
+        order.filled_quantity = filled_quantity
+    await session.commit()
+
+
 async def load_positions_by_symbol(
     session: AsyncSession, symbol: str, limit: int = 50,
 ) -> list[dict]:
@@ -546,6 +630,123 @@ async def load_rollover_history(
         "positions_closed": r.positions_closed,
         "rolled_at": r.rolled_at.isoformat() if r.rolled_at else None,
     } for r in result.scalars().all()]
+
+
+# ── Portfolio Equity Tracking ────────────────────────────────
+
+async def get_or_create_portfolio_risk(
+    session: AsyncSession,
+    default_equity: float = 100000.0,
+    user_id: Optional[int] = None,
+) -> PortfolioRisk:
+    """Get today's portfolio risk record, or create one.
+
+    On the 1st of a new month (or first ever run), sets month_start_equity
+    from the previous record's current_equity. Falls back to default_equity.
+    """
+    from datetime import date as _date
+    today = _date.today()
+    month_str = today.strftime("%Y-%m")
+
+    # Try today's record (filtered by user_id if provided)
+    stmt = select(PortfolioRisk).where(PortfolioRisk.date == today)
+    if user_id is not None:
+        stmt = stmt.where(PortfolioRisk.user_id == user_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record:
+        return record
+
+    # No record for today — find the most recent one
+    prev_stmt = (
+        select(PortfolioRisk)
+        .order_by(PortfolioRisk.date.desc())
+        .limit(1)
+    )
+    if user_id is not None:
+        prev_stmt = prev_stmt.where(PortfolioRisk.user_id == user_id)
+    prev_result = await session.execute(prev_stmt)
+    prev = prev_result.scalar_one_or_none()
+
+    if prev:
+        prev_month = prev.date.strftime("%Y-%m")
+        if prev_month == month_str:
+            # Same month — carry forward month_start_equity
+            month_start = prev.month_start_equity
+        else:
+            # New month — use previous record's current equity as new month start
+            month_start = prev.current_equity
+        current = prev.current_equity
+    else:
+        # First ever record
+        month_start = default_equity
+        current = default_equity
+
+    record = PortfolioRisk(
+        user_id=user_id,
+        date=today,
+        month_start_equity=month_start,
+        current_equity=current,
+        total_open_risk=0.0,
+        month_realized_losses=0.0,
+        total_risk_percent=0.0,
+        is_halted=False,
+    )
+    session.add(record)
+    await session.commit()
+    await session.refresh(record)
+    logger.info(
+        "Portfolio risk record created: date={} month_start={:.2f} current={:.2f}",
+        today, month_start, current,
+    )
+    return record
+
+
+async def update_portfolio_equity(
+    session: AsyncSession,
+    realized_pnl: float,
+    user_id: Optional[int] = None,
+) -> PortfolioRisk:
+    """Update current equity after a trade closes.
+
+    Args:
+        realized_pnl: Positive = profit, negative = loss.
+        user_id: Optional user ID for multi-user filtering.
+    """
+    from app.config import settings
+    record = await get_or_create_portfolio_risk(
+        session, default_equity=settings.paper_starting_capital, user_id=user_id,
+    )
+    record.current_equity += realized_pnl
+    if realized_pnl < 0:
+        record.month_realized_losses += abs(realized_pnl)
+    record.updated_at = datetime.utcnow()
+    await session.commit()
+    return record
+
+
+async def get_current_equity(
+    session: AsyncSession,
+    user_id: Optional[int] = None,
+) -> float:
+    """Get current account equity from latest portfolio risk record."""
+    from app.config import settings
+    record = await get_or_create_portfolio_risk(
+        session, default_equity=settings.paper_starting_capital, user_id=user_id,
+    )
+    return record.current_equity
+
+
+async def get_month_start_equity(
+    session: AsyncSession,
+    user_id: Optional[int] = None,
+) -> float:
+    """Get month-start equity for circuit breaker."""
+    from app.config import settings
+    record = await get_or_create_portfolio_risk(
+        session, default_equity=settings.paper_starting_capital, user_id=user_id,
+    )
+    return record.month_start_equity
 
 
 async def load_continuous_candles(

@@ -16,17 +16,231 @@ from app.config import settings
 from app.database import async_session
 from app.pipeline.candle_builder import CandleBuilder
 from app.pipeline.indicator_engine import IndicatorEngine
+from app.pipeline.market_hours import get_session as get_market_session
 from app.pipeline.utils import last_non_null, slope_of_last, trend_of_last
 from app.pipeline import db_persistence as db
+from app.trading.executor import TradeExecutor, ExitReason
+from app.trading.paper import PaperPlacer
+
+
+# ── Alert State Manager ──────────────────────────────────────
+# Prevents alert spam from alignment oscillation, repeated signals,
+# and noise near decision boundaries.
+#
+# Design principles (from freqtrade, jesse-ai, TradingView alerts):
+#   1. Cooldown: Don't re-alert same level+direction within N minutes
+#   2. Hysteresis: Require alignment to persist N consecutive evals before firing
+#   3. Direction-aware: BULLISH S1 alert doesn't suppress BEARISH S1 alert
+#   4. Signal dedup: Same direction within cooldown = duplicate (ignore price)
+#   5. Flip detection: Direction change always alerts (no cooldown)
+
+class AlertStateManager:
+    """Tracks alert state to prevent spam while allowing legitimate alerts.
+
+    Anti-spam features:
+      1. Cooldown: Don't re-alert same level+direction within N minutes
+      2. Hysteresis: Require alignment to persist N consecutive evals before firing
+      3. Direction-aware: BULLISH S1 alert doesn't suppress BEARISH S1 alert
+      4. Signal dedup: Same direction within cooldown = duplicate (ignore price)
+      5. Flip confirmation: Direction change requires N consecutive bars to confirm
+      6. Wave confirmation: Wave signal must persist N bars before alignment counts
+    """
+
+    # Cooldown in seconds per alignment level
+    COOLDOWNS = {
+        1: 30 * 60,    # Screen 1 (tide): 30 min cooldown
+        2: 15 * 60,    # Screen 1+2 (tide+wave): 15 min cooldown
+        3: 10 * 60,    # Full alignment: 10 min cooldown
+    }
+
+    # Consecutive evaluations required before alerting (hysteresis)
+    CONFIRM_COUNT = {
+        1: 2,  # Screen 1: must persist 2 consecutive evals
+        2: 1,  # Screen 1+2: immediate (wave already filtered by Screen 1)
+        3: 1,  # Full alignment: immediate (already confirmed by Screen 1+2)
+    }
+
+    # Signal execution cooldown (same direction, regardless of price)
+    SIGNAL_COOLDOWN = 30 * 60  # 30 minutes
+
+    def __init__(self, config: Optional[dict] = None):
+        config = config or {}
+        self._flip_confirm_bars: int = config.get(
+            "flip_confirm_bars", settings.flip_confirm_bars
+        )
+        self._wave_confirm_bars: int = config.get(
+            "wave_confirm_bars", settings.wave_confirm_bars
+        )
+
+        # Last alert timestamp per (level, direction) — for cooldown
+        self._last_alert: dict[str, float] = {}  # "level:direction" -> epoch
+
+        # Consecutive alignment counter per level — for hysteresis
+        self._consecutive: dict[int, int] = {1: 0, 2: 0, 3: 0}
+
+        # Previous alignment state — for tracking transitions
+        self._prev_level: int = 0
+        self._prev_direction: Optional[str] = None
+
+        # Last signal execution per direction — for signal dedup
+        self._last_signal_time: dict[str, float] = {}  # "LONG"/"SHORT" -> epoch
+
+        # Flip confirmation state — requires N consecutive bars of new direction
+        # _established_direction is the direction of the last confirmed alert
+        # _flip_direction/_flip_counter track the pending (unconfirmed) new direction
+        self._established_direction: Optional[str] = None
+        self._flip_counter: int = 0
+        self._flip_direction: Optional[str] = None
+
+        # Wave confirmation state — requires N consecutive same-direction readings
+        self._wave_state: Optional[str] = None       # Last confirmed wave
+        self._wave_pending: Optional[str] = None      # Pending wave direction
+        self._wave_confirm_count: int = 0
+
+    def check_alignment_alert(
+        self, level: int, direction: Optional[str], now: Optional[float] = None,
+    ) -> bool:
+        """Check if an alignment alert should fire.
+
+        Returns True if alert should be sent, False if suppressed.
+        Updates internal state. Direction flips require sustained confirmation.
+        """
+        import time as _t
+        now = now or _t.time()
+
+        if level <= 0 or direction is None:
+            # Alignment lost — reset consecutive counter for this level
+            for lv in range(1, 4):
+                if lv > level:
+                    self._consecutive[lv] = 0
+            self._prev_level = level
+            self._prev_direction = direction
+            # Reset flip tracking when alignment drops to 0
+            if level <= 0:
+                self._flip_counter = 0
+                self._flip_direction = None
+            return False
+
+        # ── Flip confirmation: require N consecutive bars of new direction ──
+        is_confirmed_flip = False
+        if (self._established_direction is not None
+                and direction != self._established_direction
+                and self._prev_level > 0):
+            # Direction differs from established — count consecutive bars
+            if self._flip_direction == direction:
+                self._flip_counter += 1
+            else:
+                # Different pending direction — restart count
+                self._flip_direction = direction
+                self._flip_counter = 1
+
+            if self._flip_counter >= self._flip_confirm_bars:
+                is_confirmed_flip = True
+                self._flip_counter = 0
+                self._flip_direction = None
+        elif direction == self._established_direction:
+            # Returned to established direction — reset flip tracking
+            self._flip_counter = 0
+            self._flip_direction = None
+
+        # Update consecutive counter
+        if level >= self._prev_level:
+            self._consecutive[level] = self._consecutive.get(level, 0) + 1
+        else:
+            # Level dropped — reset higher levels
+            for lv in range(level + 1, 4):
+                self._consecutive[lv] = 0
+
+        should_alert = False
+        alert_key = f"{level}:{direction}"
+
+        if level > self._prev_level or is_confirmed_flip:
+            # Level increased or confirmed direction flip — candidate for alert
+
+            # Check hysteresis (must persist N evals)
+            required = self.CONFIRM_COUNT.get(level, 1)
+            if self._consecutive.get(level, 0) >= required or is_confirmed_flip:
+                # Check cooldown (confirmed flips still respect cooldown)
+                cooldown = self.COOLDOWNS.get(level, 600)
+                last = self._last_alert.get(alert_key, 0)
+                if now - last >= cooldown:
+                    should_alert = True
+                    self._last_alert[alert_key] = now
+                    self._established_direction = direction
+
+        # Set established direction on first alert (level increase from 0)
+        if self._established_direction is None and level > 0:
+            if self._consecutive.get(level, 0) >= self.CONFIRM_COUNT.get(level, 1):
+                self._established_direction = direction
+                should_alert = True
+                self._last_alert[alert_key] = now
+
+        self._prev_level = level
+        self._prev_direction = direction
+        return should_alert
+
+    def check_wave_confirmed(self, wave_signal: Optional[str]) -> Optional[str]:
+        """Filter wave signal through confirmation requirement.
+
+        Requires wave_confirm_bars consecutive same-direction readings
+        before acknowledging the wave. Returns the confirmed wave or None.
+        """
+        if wave_signal is None:
+            self._wave_pending = None
+            self._wave_confirm_count = 0
+            return self._wave_state
+
+        if wave_signal == self._wave_pending:
+            self._wave_confirm_count += 1
+        else:
+            self._wave_pending = wave_signal
+            self._wave_confirm_count = 1
+
+        if self._wave_confirm_count >= self._wave_confirm_bars:
+            self._wave_state = wave_signal
+
+        return self._wave_state
+
+    def check_signal_dedup(self, direction: str, now: Optional[float] = None) -> bool:
+        """Check if a signal execution should proceed.
+
+        Returns True if signal is new (not duplicate), False if suppressed.
+        Deduplicates by direction + time window (ignores price changes).
+        """
+        import time as _t
+        now = now or _t.time()
+
+        last = self._last_signal_time.get(direction, 0)
+        if now - last < self.SIGNAL_COOLDOWN:
+            return False  # Too soon — duplicate
+
+        self._last_signal_time[direction] = now
+        return True
+
+    def reset(self):
+        """Reset all state (e.g., on session restart)."""
+        self._last_alert.clear()
+        self._consecutive = {1: 0, 2: 0, 3: 0}
+        self._prev_level = 0
+        self._prev_direction = None
+        self._last_signal_time.clear()
+        self._established_direction = None
+        self._flip_counter = 0
+        self._flip_direction = None
+        self._wave_state = None
+        self._wave_pending = None
+        self._wave_confirm_count = 0
 
 
 class AssetSession:
     """Manages the full pipeline for a single asset."""
 
-    def __init__(self, symbol: str, exchange: str, token: str):
+    def __init__(self, symbol: str, exchange: str, token: str, user_id: Optional[int] = None):
         self.symbol = symbol
         self.exchange = exchange
         self.token = token
+        self.user_id = user_id  # None = legacy single-user mode
+        self._asset_trading_mode: Optional[str] = None  # Per-asset override (PAPER/LIVE)
         self.instrument_id: Optional[int] = None
         self.active = False
         self.contract_symbol: Optional[str] = None  # e.g. "NIFTY30MAR26FUT"
@@ -45,11 +259,14 @@ class AssetSession:
         # Latest Triple Screen analysis
         self.latest_analysis: Optional[dict] = None
 
-        # Track last processed signal to avoid duplicates
-        self._last_signal_key: Optional[str] = None
+        # Alert state manager — prevents spam from oscillation/noise
+        # Handles: cooldowns, hysteresis, direction-aware dedup, flip confirmation, wave confirmation
+        self._alert_mgr = AlertStateManager()
+
+        # Exit dedup — prevents duplicate stop/target notifications per position
+        self._exit_initiated: set[int] = set()
 
         # Alignment tracking for progressive alerts
-        self._prev_alignment_level: int = 0
         self.alignment: dict = {
             "screen1": False, "screen2": False, "screen3": False,
             "level": 0, "direction": None, "description": "No setup",
@@ -64,6 +281,127 @@ class AssetSession:
         # Broadcast callback (set by PipelineManager)
         self._broadcast: Optional[callable] = None
 
+        # Per-symbol lock to prevent concurrent signal processing / stop checks
+        self._signal_lock = asyncio.Lock()
+
+        # Singleton circuit breaker — persists across signals, synced from DB
+        from app.risk.circuit_breaker import CircuitBreaker
+        self._circuit_breaker = CircuitBreaker({
+            "max_portfolio_risk_pct": settings.max_portfolio_risk_pct,
+        })
+
+        # Trade executor — unified state machine for trade lifecycle
+        self._init_executor()
+
+    @property
+    def effective_trading_mode(self) -> str:
+        """Resolve trading mode: per-asset override > global default."""
+        if self._asset_trading_mode:
+            return self._asset_trading_mode
+        return settings.trading_mode
+
+    def _init_executor(self):
+        """Initialize the TradeExecutor with the appropriate placer for the trading mode."""
+        if self.effective_trading_mode == "LIVE":
+            from app.trading.live import LivePlacer
+            placer = LivePlacer()
+        else:
+            placer = PaperPlacer(slippage_pct=0.0)
+        self.executor = TradeExecutor(placer, on_notify=self._on_executor_event)
+
+    def _on_executor_event(self, event: str, data: dict):
+        """Callback for TradeExecutor events — log for now."""
+        logger.info("Executor event [{}]: {} {}", self.symbol, event, data)
+
+    async def _init_circuit_breaker(self):
+        """Sync circuit breaker from DB — load month start equity + realized losses."""
+        try:
+            from datetime import date as _date
+            async with async_session() as session:
+                month_start = await db.get_month_start_equity(session, user_id=self.user_id)
+                self._circuit_breaker.set_month_start_equity(month_start)
+
+                # Sync realized losses from this month's trades
+                month_str = _date.today().strftime("%Y-%m")
+                month_trades = await db.load_month_trades(session, month_str)
+                self._circuit_breaker.sync_from_db(month_trades)
+                logger.info(
+                    "Circuit breaker initialized: month_start={:.2f} losses={:.2f}",
+                    month_start, self._circuit_breaker.realized_losses,
+                )
+        except Exception as e:
+            logger.warning("Circuit breaker init failed, using defaults: {}", e)
+
+    async def _recover_state(self):
+        """Recover orphaned positions and orders from previous session (crash recovery).
+
+        1. Load per-asset trading mode from DB
+        2. Load OPEN positions from DB → populate _exit_initiated and CB open risk
+        3. Cancel stale PENDING orders (>1h old in PAPER mode)
+        4. Sync executor with recovered positions
+        """
+        try:
+            import time as _t
+            async with async_session() as session:
+                # Load per-asset trading mode if user_id is set
+                if self.user_id:
+                    from sqlalchemy import select as _sel
+                    from app.models.user import UserAssetSettings
+                    stmt = _sel(UserAssetSettings).where(
+                        UserAssetSettings.user_id == self.user_id,
+                        UserAssetSettings.symbol == self.symbol,
+                        UserAssetSettings.exchange == self.exchange,
+                    )
+                    asset_result = await session.execute(stmt)
+                    asset_cfg = asset_result.scalar_one_or_none()
+                    if asset_cfg:
+                        self._asset_trading_mode = asset_cfg.trading_mode
+                        logger.info(
+                            "Loaded per-asset mode for {} {}: {}",
+                            self.symbol, self.user_id, self._asset_trading_mode,
+                        )
+                        # Re-init executor with correct mode
+                        self._init_executor()
+
+            async with async_session() as session:
+                # 1. Recover open positions
+                positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                if positions:
+                    open_risk_positions = []
+                    for pos in positions:
+                        open_risk_positions.append({
+                            "entry_price": pos.entry_price,
+                            "stop_price": pos.stop_price or 0,
+                            "shares": pos.quantity,
+                            "direction": "BUY" if pos.direction == "LONG" else "SELL",
+                        })
+                    # Update circuit breaker with open risk
+                    self._circuit_breaker.update_open_positions(open_risk_positions)
+                    logger.info(
+                        "Recovered {} open positions for {} (CB open risk updated)",
+                        len(positions), self.symbol,
+                    )
+
+                # 2. Handle stale PENDING orders
+                pending = await db.load_pending_orders(session)
+                stale_count = 0
+                for order in pending:
+                    if order.symbol != self.symbol:
+                        continue
+                    # In PAPER mode, cancel orders older than 1 hour
+                    if (order.mode or self.effective_trading_mode) == "PAPER":
+                        if order.created_at:
+                            age = _t.time() - order.created_at.timestamp()
+                            if age > 3600:  # 1 hour
+                                order.status = "CANCELLED"
+                                stale_count += 1
+                if stale_count:
+                    await session.commit()
+                    logger.info("Cancelled {} stale PENDING orders for {}", stale_count, self.symbol)
+
+        except Exception as e:
+            logger.warning("State recovery failed for {}: {}", self.symbol, e)
+
     async def start(self):
         """Initialize session: resolve instrument, load history, compute indicators."""
         logger.info("Starting AssetSession for {}:{}", self.symbol, self.exchange)
@@ -74,6 +412,9 @@ class AssetSession:
                 session, self.symbol, self.exchange, self.token
             )
             self.instrument_id = inst.id
+
+        # Initialize circuit breaker from DB
+        await self._init_circuit_breaker()
 
         # Resolve contract expiry from scrip master
         await self._resolve_expiry()
@@ -88,7 +429,8 @@ class AssetSession:
         for screen, tf in self.screen_timeframes.items():
             if tf not in ("1w",):  # Weekly is resampled from daily
                 self.candle_builders[tf] = CandleBuilder(
-                    tf, on_bar_close=self._on_bar_close_sync
+                    tf, on_bar_close=self._on_bar_close_sync,
+                    exchange=self.exchange, symbol=self.symbol,
                 )
                 self._engines[tf] = IndicatorEngine(self.symbol, tf)
 
@@ -105,6 +447,9 @@ class AssetSession:
                 engine = self._engines.get(tf)
                 if engine:
                     self.indicators[tf] = engine.compute_for_screen(df, screen_num)
+
+        # Recover orphaned positions/orders from previous session
+        await self._recover_state()
 
         # Run initial analysis
         await self._evaluate_signals()
@@ -273,10 +618,15 @@ class AssetSession:
             ts_val = candle.get("timestamp", datetime.now().isoformat())
             new_row["timestamp"] = [ts_val]
 
+        # Rolling window: keep max 500 bars per timeframe to bound memory
+        MAX_BUFFER_BARS = 500
         if timeframe in self.candle_buffers and not self.candle_buffers[timeframe].empty:
-            self.candle_buffers[timeframe] = pd.concat(
+            buf = pd.concat(
                 [self.candle_buffers[timeframe], new_row], ignore_index=True
             )
+            if len(buf) > MAX_BUFFER_BARS:
+                buf = buf.iloc[-MAX_BUFFER_BARS:]
+            self.candle_buffers[timeframe] = buf
         else:
             self.candle_buffers[timeframe] = new_row
 
@@ -326,29 +676,87 @@ class AssetSession:
         await self._evaluate_signals()
 
     async def _check_stop_losses(self, current_price: float):
-        """Check if any open position's stop has been breached. Close if so."""
+        """Check if any open position's stop or target has been hit. Close if so."""
+        if not self._signal_lock.locked():
+            async with self._signal_lock:
+                return await self._check_stop_losses_inner(current_price)
+        else:
+            # Lock held by signal evaluation — skip this check
+            return
+
+    async def _check_stop_losses_inner(self, current_price: float):
+        """Inner stop/target check (called under lock)."""
         if current_price <= 0:
             return
         try:
             async with async_session() as session:
                 positions = await db.load_open_positions_by_symbol(session, self.symbol)
                 for pos in positions:
-                    if not pos.stop_price or pos.stop_price <= 0:
+                    # Skip if exit already initiated for this position
+                    if pos.id in self._exit_initiated:
                         continue
-                    breached = False
-                    if pos.direction == "LONG" and current_price <= pos.stop_price:
-                        breached = True
-                    elif pos.direction == "SHORT" and current_price >= pos.stop_price:
-                        breached = True
+                    exit_reason = None
+                    # Check stop loss
+                    if pos.stop_price and pos.stop_price > 0:
+                        if pos.direction == "LONG" and current_price <= pos.stop_price:
+                            exit_reason = "STOP_LOSS"
+                        elif pos.direction == "SHORT" and current_price >= pos.stop_price:
+                            exit_reason = "STOP_LOSS"
 
-                    if breached:
+                    # Check target price (2:1 R:R)
+                    if not exit_reason and pos.target_price and pos.target_price > 0:
+                        if pos.direction == "LONG" and current_price >= pos.target_price:
+                            exit_reason = "TARGET"
+                        elif pos.direction == "SHORT" and current_price <= pos.target_price:
+                            exit_reason = "TARGET"
+
+                    if exit_reason:
+                        # Mark exit as initiated to prevent duplicate processing
+                        self._exit_initiated.add(pos.id)
+                        # Place live exit order if in LIVE mode
+                        if pos.mode == "LIVE":
+                            try:
+                                from app.trading.live import LivePlacer
+                                placer = LivePlacer()
+                                exit_dir = "SELL" if pos.direction == "LONG" else "BUY"
+                                result = await placer.place_exit(
+                                    symbol=self.symbol, token=self.token,
+                                    exchange=self.exchange, direction=exit_dir,
+                                    quantity=pos.quantity, order_type="MARKET",
+                                    price=current_price, product_type="CARRYFORWARD",
+                                )
+                                if result.status == "REJECTED":
+                                    logger.error(
+                                        "LIVE exit REJECTED for {} {}: {}",
+                                        self.symbol, exit_reason, result.message,
+                                    )
+                                    continue  # Don't close in DB if broker rejected
+                                logger.info(
+                                    "[LIVE] Exit order placed: {} {} order={}",
+                                    exit_dir, self.symbol, result.order_id,
+                                )
+                            except Exception as e:
+                                logger.error("LIVE exit order failed for {}: {}", self.symbol, e)
+                                continue  # Don't close DB position if broker call failed
+
                         trade = await db.close_position(session, pos.id, current_price)
                         if trade:
                             pnl = (current_price - pos.entry_price) * pos.quantity if pos.direction == "LONG" \
                                 else (pos.entry_price - current_price) * pos.quantity
+
+                            # Update account equity + circuit breaker
+                            try:
+                                await db.update_portfolio_equity(session, pnl, user_id=self.user_id)
+                                if pnl < 0:
+                                    self._circuit_breaker.record_loss(abs(pnl))
+                            except Exception:
+                                pass
+
+                            label = "STOP HIT" if exit_reason == "STOP_LOSS" else "TARGET HIT"
                             logger.info(
-                                "STOP HIT: {} {} closed @ {:.2f} (stop={:.2f}) P&L={:.2f}",
-                                pos.direction, self.symbol, current_price, pos.stop_price, pnl,
+                                "{}: {} {} closed @ {:.2f} (stop={:.2f}, target={}) P&L={:.2f}",
+                                label, pos.direction, self.symbol, current_price,
+                                pos.stop_price or 0, pos.target_price or 0, pnl,
                             )
                             await self._broadcast_event("position_closed", {
                                 "symbol": self.symbol,
@@ -356,26 +764,30 @@ class AssetSession:
                                 "entry_price": pos.entry_price,
                                 "exit_price": current_price,
                                 "stop_price": pos.stop_price,
+                                "target_price": pos.target_price,
                                 "quantity": pos.quantity,
                                 "pnl": round(pnl, 2),
-                                "reason": "STOP_LOSS",
+                                "reason": exit_reason,
                             })
-                            # Telegram alert
+                            # Notification
                             try:
-                                from app.notifications.telegram import _send
-                                emoji = "🛑" if pnl < 0 else "✅"
-                                await _send(
-                                    f"{emoji} <b>STOP HIT: {self.symbol}</b>\n\n"
-                                    f"Direction: {pos.direction}\n"
-                                    f"Entry: ₹{pos.entry_price:,.2f} → Exit: ₹{current_price:,.2f}\n"
-                                    f"Stop: ₹{pos.stop_price:,.2f}\n"
-                                    f"P&L: <b>₹{pnl:,.2f}</b>\n"
-                                    f"Qty: {pos.quantity}"
+                                from app.notifications.telegram import notify_position_closed
+                                await notify_position_closed(
+                                    symbol=self.symbol,
+                                    direction=pos.direction,
+                                    entry_price=pos.entry_price,
+                                    exit_price=current_price,
+                                    quantity=pos.quantity,
+                                    pnl=round(pnl, 2),
+                                    reason=exit_reason,
+                                    stop_price=pos.stop_price or 0,
+                                    target_price=pos.target_price or 0,
+                                    mode=pos.mode or settings.trading_mode,
                                 )
                             except Exception:
                                 pass
         except Exception as e:
-            logger.debug("Stop check failed for {}: {}", self.symbol, e)
+            logger.debug("Stop/target check failed for {}: {}", self.symbol, e)
 
     async def _update_trailing_stops(self):
         """Update open position stops using SafeZone (Elder's trailing stop method).
@@ -415,6 +827,8 @@ class AssetSession:
                     if new_stop:
                         old_stop = pos.stop_price or 0
                         await db.update_position_stop(session, pos.id, new_stop, ltp)
+                        # Also update executor's in-memory stop
+                        self.executor.update_stop(self.symbol, new_stop)
                         # Check if stop actually tightened
                         if (pos.direction == "LONG" and new_stop > old_stop) or \
                            (pos.direction == "SHORT" and new_stop < old_stop):
@@ -433,7 +847,12 @@ class AssetSession:
             logger.debug("Trailing stop update failed for {}: {}", self.symbol, e)
 
     async def _evaluate_signals(self):
-        """Run Triple Screen analysis on latest indicator data."""
+        """Run Triple Screen analysis on latest indicator data (under lock)."""
+        async with self._signal_lock:
+            await self._evaluate_signals_inner()
+
+    async def _evaluate_signals_inner(self):
+        """Inner signal evaluation (called under lock)."""
         try:
             from app.strategy.triple_screen import TripleScreenAnalysis
 
@@ -450,16 +869,30 @@ class AssetSession:
             if not ind1 or not ind2:
                 return
 
-            # Screen 1: Trend
+            # Skip analysis if any screen has insufficient data
+            if ind1.get("insufficient_data") or ind2.get("insufficient_data"):
+                logger.debug(
+                    "Skipping analysis for {}: insufficient indicator data",
+                    self.symbol,
+                )
+                return
+
+            # Screen 1: Trend — apply dead zone to MACD-H slope
+            raw_slope = slope_of_last(ind1.get("macd_histogram", []))
+            clamped_slope = 0 if (raw_slope is not None
+                                  and abs(raw_slope) < settings.tide_dead_zone) else raw_slope
             screen1 = {
-                "macd_histogram_slope": slope_of_last(ind1.get("macd_histogram", [])),
+                "macd_histogram_slope": clamped_slope,
                 "impulse_signal": last_non_null(ind1.get("impulse_signal", []), "neutral"),
                 "ema_trend": trend_of_last(ind1.get("ema13", [])),
             }
 
-            # Screen 2: Oscillator
+            # Screen 2: Oscillator — apply dead zone to Force Index(2)
+            raw_fi2 = last_non_null(ind2.get("force_index_2", []))
+            clamped_fi2 = 0 if (raw_fi2 is not None
+                                and abs(raw_fi2) < settings.wave_fi2_dead_zone) else raw_fi2
             screen2 = {
-                "force_index_2": last_non_null(ind2.get("force_index_2", [])),
+                "force_index_2": clamped_fi2,
                 "elder_ray_bear": last_non_null(ind2.get("elder_ray_bear", [])),
                 "elder_ray_bull": last_non_null(ind2.get("elder_ray_bull", [])),
                 "elder_ray_bear_trend": trend_of_last(ind2.get("elder_ray_bear", [])),
@@ -473,13 +906,16 @@ class AssetSession:
             candles_2 = self.candle_buffers.get(screen2_tf, pd.DataFrame())
             if not candles_2.empty and vz_fast and vz_slow:
                 last_close = float(candles_2.iloc[-1].get("close", 0))
-                lo, hi = min(vz_fast, vz_slow), max(vz_fast, vz_slow)
-                if lo <= last_close <= hi:
-                    screen2["value_zone_position"] = 0
-                elif last_close > hi:
-                    screen2["value_zone_position"] = 1
+                if last_close <= 0:
+                    screen2["value_zone_position"] = None
                 else:
-                    screen2["value_zone_position"] = -1
+                    lo, hi = min(vz_fast, vz_slow), max(vz_fast, vz_slow)
+                    if lo <= last_close <= hi:
+                        screen2["value_zone_position"] = 0
+                    elif last_close > hi:
+                        screen2["value_zone_position"] = 1
+                    else:
+                        screen2["value_zone_position"] = -1
             else:
                 screen2["value_zone_position"] = None
 
@@ -502,14 +938,17 @@ class AssetSession:
             s2_data = analysis.get("screen2", {})
             rec = analysis.get("recommendation", {})
             tide = s1_data.get("tide")
-            wave = s2_data.get("signal")
+            raw_wave = s2_data.get("signal")
             action = rec.get("action", "WAIT")
             confidence = rec.get("confidence", 0)
             grade = analysis.get("grade", "D")
 
+            # Filter wave through confirmation (requires N consecutive same readings)
+            wave = self._alert_mgr.check_wave_confirmed(raw_wave)
+
             # Screen 1 aligned = tide is clear (not neutral)
             s1_aligned = tide in ("BULLISH", "BEARISH")
-            # Screen 2 aligned = wave signal matches tide direction
+            # Screen 2 aligned = confirmed wave signal matches tide direction
             s2_aligned = (
                 (tide == "BULLISH" and wave == "BUY") or
                 (tide == "BEARISH" and wave == "SELL")
@@ -541,27 +980,31 @@ class AssetSession:
                 "confidence": confidence,
             }
 
-            # ── Progressive alignment alerts ──
-            prev_level = self._prev_alignment_level
-            if level > prev_level:
+            # ── Progressive alignment alerts (with anti-spam) ──
+            # AlertStateManager handles: cooldowns, hysteresis, direction flips,
+            # and oscillation suppression (tide toggling near boundary)
+            should_alert = self._alert_mgr.check_alignment_alert(level, direction)
+
+            if should_alert:
                 try:
-                    from app.notifications.telegram import _send
-                    if level == 1 and prev_level == 0:
+                    from app.notifications.telegram import _send, Priority
+                    if level == 1:
                         await _send(
                             f"📊 <b>{self.symbol}</b> — Screen 1 aligned\n"
                             f"Tide: <b>{tide}</b> | Direction: {direction}\n"
-                            f"Watching for Screen 2 confirmation..."
+                            f"Watching for Screen 2 confirmation...",
+                            priority=Priority.LOW,
                         )
                     elif level == 2:
-                        emoji = "🟢" if direction == "LONG" else "🔴"
                         await _send(
-                            f"{emoji} <b>{self.symbol}</b> — Tide + Wave ALIGNED\n"
+                            f"{'🟢' if direction == 'LONG' else '🔴'} <b>{self.symbol}</b> — Tide + Wave ALIGNED\n"
                             f"Direction: <b>{direction}</b>\n"
                             f"Tide: {tide} | Wave: {wave}\n"
-                            f"⏳ Waiting for entry trigger (Screen 3)..."
+                            f"⏳ Waiting for entry trigger (Screen 3)...",
+                            priority=Priority.NORMAL,
+                            discord_color="buy" if direction == "LONG" else "sell",
                         )
                     elif level == 3:
-                        emoji = "🟢" if direction == "LONG" else "🔴"
                         entry = rec.get("entry_price", 0)
                         stop = rec.get("stop_price", 0)
                         await _send(
@@ -569,11 +1012,12 @@ class AssetSession:
                             f"Grade: <b>{grade}</b> | Confidence: <b>{confidence}%</b>\n"
                             f"Entry: ₹{entry:,.2f} | Stop: ₹{stop:,.2f}\n"
                             f"Direction: <b>{direction}</b>\n\n"
-                            f"Mode: <b>{settings.trading_mode}</b>"
+                            f"Mode: <b>{settings.trading_mode}</b>",
+                            priority=Priority.HIGH,
+                            discord_color="buy" if action == "BUY" else "sell",
                         )
                 except Exception:
                     pass
-            self._prev_alignment_level = level
 
             # Auto-execute on full alignment
             if s3_aligned:
@@ -597,11 +1041,27 @@ class AssetSession:
         stop_price = rec.get("stop_price", 0)
         grade = analysis.get("grade", "D")
 
-        # Dedup: skip if same signal already processed (in-memory check)
-        signal_key = f"{action}:{entry_price}:{stop_price}:{grade}"
-        if signal_key == self._last_signal_key:
+        # Position-aware dedup: suppress same-direction signal if already in position
+        direction = "LONG" if action == "BUY" else "SHORT"
+        try:
+            async with async_session() as session:
+                open_positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                for pos in open_positions:
+                    if pos.direction == direction:
+                        logger.debug(
+                            "Signal suppressed: already {} {} (position {})",
+                            direction, self.symbol, pos.id,
+                        )
+                        return
+        except Exception:
+            pass  # If position check fails, proceed anyway
+
+        # Dedup: direction + time-based (ignores small price changes)
+        # AlertStateManager enforces 30-min cooldown per direction
+        direction = "LONG" if action == "BUY" else "SHORT"
+        if not self._alert_mgr.check_signal_dedup(direction):
+            logger.debug("Signal suppressed by cooldown for {} ({})", self.symbol, direction)
             return
-        self._last_signal_key = signal_key
 
         # Dedup: also check DB for recent identical signal (survives restart)
         try:
@@ -609,18 +1069,30 @@ class AssetSession:
                 recent = await db.load_recent_signals(session, self.instrument_id, limit=1)
                 if recent:
                     last = recent[0]
-                    if (last["entry_price"] == entry_price
-                            and last["stop_price"] == stop_price
-                            and last["direction"] == ("LONG" if action == "BUY" else "SHORT")):
-                        logger.debug("Skipping duplicate signal for {}", self.symbol)
-                        return
+                    if last["direction"] == direction:
+                        # Same direction — check if within cooldown window
+                        from datetime import datetime as _dt
+                        last_ts = last.get("created_at") or last.get("timestamp")
+                        if last_ts:
+                            if isinstance(last_ts, str):
+                                try:
+                                    last_time = _dt.fromisoformat(last_ts)
+                                except ValueError:
+                                    last_time = None
+                            else:
+                                last_time = last_ts
+                            if last_time:
+                                import time as _t
+                                elapsed = _t.time() - last_time.timestamp()
+                                if elapsed < AlertStateManager.SIGNAL_COOLDOWN:
+                                    logger.debug("Skipping duplicate signal for {} (DB cooldown)", self.symbol)
+                                    return
         except Exception:
             pass  # If DB check fails, proceed anyway
 
-        # Risk gate: Circuit Breaker
+        # Risk gate: Circuit Breaker (singleton, persisted)
         try:
-            from app.risk.circuit_breaker import CircuitBreaker
-            cb = CircuitBreaker({"max_portfolio_risk_pct": settings.max_portfolio_risk_pct})
+            cb = self._circuit_breaker
 
             # Check for pending circuit breaker halt notification
             if hasattr(cb, '_pending_halt_notification') and cb._pending_halt_notification:
@@ -632,19 +1104,41 @@ class AssetSession:
                 except Exception:
                     pass
 
+            # Check if trading is halted
+            cb_status = cb.check_can_trade()
+            if not cb_status.get("is_allowed", True):
+                logger.info("Signal blocked by circuit breaker: {}", cb_status.get("halt_reason"))
+                return
+
             if entry_price and stop_price:
                 risk_per_share = abs(entry_price - stop_price)
-                # Position sizing
+
+                # Get real account equity from DB
+                async with async_session() as session:
+                    account_equity = await db.get_current_equity(session, user_id=self.user_id)
+
+                # Position sizing with real equity
                 from app.risk.position_sizer import PositionSizer
                 ps = PositionSizer({"max_risk_per_trade_pct": settings.max_risk_per_trade_pct})
                 sizing = ps.calculate_position_size(
                     entry_price=entry_price,
                     stop_price=stop_price,
-                    account_equity=100000,  # Paper capital
+                    account_equity=account_equity,
                 )
                 if not sizing.get("is_valid", False):
                     logger.info("Signal rejected by position sizer: {}", sizing.get("reason"))
                     return
+
+                # Check if this trade would breach 6% rule
+                trade_risk = sizing.get("risk_amount", 0)
+                if trade_risk > 0:
+                    new_trade_check = cb.check_new_trade_risk(trade_risk)
+                    if not new_trade_check.get("is_allowed", True):
+                        logger.info(
+                            "Signal rejected by 6% rule: {} (exposure {:.1f}%)",
+                            self.symbol, new_trade_check.get("projected_pct", 0),
+                        )
+                        return
             else:
                 sizing = {"shares": 0, "risk_amount": 0}
         except Exception as e:
@@ -656,6 +1150,7 @@ class AssetSession:
         try:
             async with async_session() as session:
                 signal = await db.save_signal(session, {
+                    "user_id": self.user_id,
                     "instrument_id": self.instrument_id,
                     "symbol": self.symbol,
                     "direction": direction,
@@ -670,26 +1165,17 @@ class AssetSession:
             logger.error("Signal DB save failed: {}", e)
             return
 
-        # Execute or alert
-        if settings.trading_mode == "PAPER" and sizing.get("shares", 0) > 0:
+        # Execute
+        if sizing.get("shares", 0) > 0:
             await self._auto_execute(signal, sizing, analysis)
         else:
-            # LIVE mode: just broadcast alert
-            await self._broadcast_event("trade_alert", {
-                "symbol": self.symbol,
-                "action": action,
-                "grade": grade,
-                "confidence": confidence,
-                "entry_price": entry_price,
-                "stop_price": stop_price,
-                "shares": sizing.get("shares", 0),
-                "signal_id": signal.id,
-            })
+            logger.info("Signal {} skipped: zero shares from position sizer", signal.id)
 
     async def _auto_execute(self, signal, sizing: dict, analysis: dict):
-        """Auto-execute in paper mode."""
+        """Auto-execute trade via TradeExecutor (PAPER and LIVE modes)."""
         rec = analysis["recommendation"]
         direction = "BUY" if rec["action"] == "BUY" else "SELL"
+        pos_direction = "LONG" if direction == "BUY" else "SHORT"
         entry = rec.get("entry_price", 0)
         stop = rec.get("stop_price", 0)
         shares = sizing.get("shares", 0)
@@ -697,48 +1183,123 @@ class AssetSession:
         if shares <= 0 or entry <= 0:
             return
 
+        # Calculate target price (2:1 R:R by default)
+        risk_per_share = abs(entry - stop) if stop > 0 else 0
+        rr_multiplier = getattr(settings, "rr_target_multiplier", 2.0)
+        if direction == "BUY":
+            target = entry + (risk_per_share * rr_multiplier) if risk_per_share > 0 else 0
+        else:
+            target = entry - (risk_per_share * rr_multiplier) if risk_per_share > 0 else 0
+
+        mode = self.effective_trading_mode  # Per-asset or global
+
         try:
+            # Check if we need to flip an existing position
+            existing = self.executor.get_position(self.symbol)
+            if existing and existing.is_open and existing.direction != pos_direction:
+                # Flip: exit current + enter opposite
+                logger.info("Flipping {} -> {} for {}", existing.direction, pos_direction, self.symbol)
+                current_price = entry
+                # Close existing position in DB
+                async with async_session() as session:
+                    positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                    for pos in positions:
+                        if pos.direction == existing.direction:
+                            await db.close_position(session, pos.id, current_price)
+                # Exit via executor
+                await self.executor.exit_position(
+                    self.symbol, ExitReason.FLIP, current_price=current_price,
+                    token=self.token, exchange=self.exchange,
+                )
+
+            # Enter via executor (uses PaperPlacer or LivePlacer internally)
+            # Retry up to 2 times for LIVE mode rejections (e.g., transient broker errors)
+            max_retries = 2 if mode == "LIVE" else 0
+            exec_pos = None
+            for attempt in range(max_retries + 1):
+                exec_pos = await self.executor.enter(
+                    symbol=self.symbol, token=self.token, exchange=self.exchange,
+                    direction=pos_direction, quantity=shares,
+                    entry_price=entry, stop_price=stop, target_price=round(target, 2),
+                    order_type="MARKET", product_type="CARRYFORWARD",
+                )
+                if exec_pos is not None:
+                    break
+                if attempt < max_retries:
+                    logger.warning(
+                        "Entry attempt {}/{} failed for {}, retrying in {}s...",
+                        attempt + 1, max_retries + 1, self.symbol, (attempt + 1),
+                    )
+                    await asyncio.sleep(attempt + 1)  # 1s, 2s backoff
+
+            if exec_pos is None:
+                logger.error("Executor entry failed after {} attempts for {}", max_retries + 1, self.symbol)
+                await self._broadcast_event("order_rejected", {
+                    "symbol": self.symbol, "direction": direction,
+                    "quantity": shares, "reason": "All retry attempts exhausted",
+                })
+                try:
+                    from app.notifications.telegram import notify_order_rejected
+                    await notify_order_rejected(
+                        symbol=self.symbol, direction=direction,
+                        quantity=shares, reason="All retry attempts exhausted",
+                        mode=mode,
+                    )
+                except Exception:
+                    pass
+                return
+
+            broker_order_id = exec_pos.entry_order_id or f"PIPE-{signal.id:04d}"
+            filled_price = exec_pos.entry_price or entry
+            order_status = "COMPLETE" if exec_pos.state.value == "OPEN" else "PENDING"
+
+            # Persist to DB
             async with async_session() as session:
                 order = await db.save_order(session, {
+                    "user_id": self.user_id,
                     "signal_id": signal.id,
                     "instrument_id": self.instrument_id,
                     "symbol": self.symbol,
-                    "order_id": f"PIPE-{signal.id:04d}",
+                    "order_id": broker_order_id,
                     "direction": direction,
                     "order_type": "MARKET",
                     "quantity": shares,
                     "price": entry,
-                    "status": "COMPLETE",
-                    "mode": "PAPER",
-                    "filled_price": entry,
-                    "filled_quantity": shares,
+                    "status": order_status,
+                    "mode": mode,
+                    "filled_price": filled_price if order_status == "COMPLETE" else None,
+                    "filled_quantity": shares if order_status == "COMPLETE" else None,
                 })
 
-                pos_direction = "LONG" if direction == "BUY" else "SHORT"
                 position = await db.save_position(session, {
+                    "user_id": self.user_id,
                     "instrument_id": self.instrument_id,
                     "symbol": self.symbol,
                     "direction": pos_direction,
-                    "entry_price": entry,
+                    "entry_price": filled_price,
                     "quantity": shares,
                     "stop_price": stop,
-                    "current_price": entry,
+                    "target_price": round(target, 2),
+                    "current_price": filled_price,
                     "risk_amount": sizing.get("risk_amount", 0),
                     "risk_percent": sizing.get("actual_risk_pct", 0),
-                    "mode": "PAPER",
+                    "mode": mode,
                 })
 
+            # Clear exit dedup set — new position opened
+            self._exit_initiated.clear()
+
             logger.info(
-                "Auto-executed: {} {} x{} @ {:.2f} stop={:.2f}",
-                direction, self.symbol, shares, entry, stop,
+                "[{}] Auto-executed: {} {} x{} @ {:.2f} stop={:.2f} target={:.2f} order={}",
+                mode, direction, self.symbol, shares, filled_price, stop, target, broker_order_id,
             )
 
             # Telegram trade notification
             try:
                 from app.notifications.telegram import notify_trade
                 await notify_trade(
-                    self.symbol, direction, shares, entry, stop,
-                    order.order_id, "PAPER", analysis.get("grade", "?"),
+                    self.symbol, direction, shares, filled_price, stop,
+                    broker_order_id, mode, analysis.get("grade", "?"),
                 )
             except Exception:
                 pass
@@ -747,9 +1308,12 @@ class AssetSession:
                 "symbol": self.symbol,
                 "direction": direction,
                 "quantity": shares,
-                "price": entry,
-                "order_id": order.order_id,
-                "mode": "PAPER",
+                "price": filled_price,
+                "stop_price": stop,
+                "target_price": round(target, 2),
+                "order_id": broker_order_id,
+                "mode": mode,
+                "status": order_status,
             })
 
         except Exception as e:
@@ -976,6 +1540,7 @@ class AssetSession:
             "contract": self.contract_symbol,
             "expiry_date": self.expiry_date.strftime("%Y-%m-%d") if self.expiry_date else None,
             "days_to_expiry": (self.expiry_date - datetime.now()).days if self.expiry_date else None,
+            "trading_mode": self.effective_trading_mode,
         }
 
     def stop(self):

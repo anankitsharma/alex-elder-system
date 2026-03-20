@@ -429,6 +429,123 @@ async def get_asset_detail(
     return result
 
 
+@router.get("/pipeline/performance")
+async def get_performance():
+    """Portfolio performance metrics: equity curve, win rate, drawdown, R-multiples."""
+    from app.database import async_session
+    from app.pipeline import db_persistence as db
+    from app.models.trade import Trade, Order, Position
+    from sqlalchemy import select, and_, func
+    from datetime import datetime, timedelta
+
+    async with async_session() as dbsession:
+        # All completed trades
+        stmt = select(Trade).order_by(Trade.created_at)
+        result = await dbsession.execute(stmt)
+        trades = result.scalars().all()
+
+        # All closed positions for P&L
+        stmt2 = select(Position).where(Position.status == "CLOSED").order_by(Position.closed_at)
+        result2 = await dbsession.execute(stmt2)
+        closed_positions = result2.scalars().all()
+
+        # Open positions
+        stmt3 = select(Position).where(Position.status == "OPEN")
+        result3 = await dbsession.execute(stmt3)
+        open_positions = result3.scalars().all()
+
+    # Calculate metrics
+    starting_equity = 100000
+    equity = starting_equity
+    equity_curve = [{"date": "start", "equity": equity}]
+    wins = 0
+    losses = 0
+    total_pnl = 0
+    gross_profit = 0
+    gross_loss = 0
+    r_multiples = []
+    max_equity = equity
+    max_drawdown = 0
+    trade_details = []
+
+    for pos in closed_positions:
+        if not pos.entry_price or pos.entry_price <= 0:
+            continue
+        if pos.direction == "LONG":
+            pnl = ((pos.current_price or pos.entry_price) - pos.entry_price) * pos.quantity
+        else:
+            pnl = (pos.entry_price - (pos.current_price or pos.entry_price)) * pos.quantity
+
+        equity += pnl
+        total_pnl += pnl
+
+        if pnl >= 0:
+            wins += 1
+            gross_profit += pnl
+        else:
+            losses += 1
+            gross_loss += abs(pnl)
+
+        # R-multiple (reward / risk)
+        risk = abs(pos.entry_price - (pos.stop_price or pos.entry_price)) * pos.quantity
+        r_mult = pnl / risk if risk > 0 else 0
+
+        r_multiples.append(round(r_mult, 2))
+        max_equity = max(max_equity, equity)
+        drawdown = (max_equity - equity) / max_equity * 100 if max_equity > 0 else 0
+        max_drawdown = max(max_drawdown, drawdown)
+
+        date_str = pos.closed_at.strftime("%Y-%m-%d %H:%M") if pos.closed_at else "?"
+        equity_curve.append({"date": date_str, "equity": round(equity, 2)})
+
+        trade_details.append({
+            "symbol": pos.symbol,
+            "direction": pos.direction,
+            "entry": pos.entry_price,
+            "exit": pos.current_price,
+            "qty": pos.quantity,
+            "pnl": round(pnl, 2),
+            "r_multiple": round(r_mult, 2),
+            "mode": pos.mode,
+            "date": date_str,
+        })
+
+    total_trades = wins + losses
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    avg_win = gross_profit / wins if wins > 0 else 0
+    avg_loss = gross_loss / losses if losses > 0 else 0
+    profit_factor = min(gross_profit / gross_loss, 999.99) if gross_loss > 0 else 999.99 if gross_profit > 0 else 0
+    expectancy = (win_rate/100 * avg_win) - ((1 - win_rate/100) * avg_loss) if total_trades > 0 else 0
+
+    # Unrealized P&L from open positions
+    unrealized_pnl = 0
+    for pos in open_positions:
+        if pos.direction == "LONG":
+            unrealized_pnl += ((pos.current_price or pos.entry_price) - pos.entry_price) * pos.quantity
+        else:
+            unrealized_pnl += (pos.entry_price - (pos.current_price or pos.entry_price)) * pos.quantity
+
+    return {
+        "starting_equity": starting_equity,
+        "current_equity": round(equity, 2),
+        "total_pnl": round(total_pnl, 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 1),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "profit_factor": round(profit_factor, 2),
+        "expectancy": round(expectancy, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "r_multiples": r_multiples,
+        "equity_curve": equity_curve,
+        "open_positions": len(open_positions),
+        "recent_trades": trade_details[-20:],
+    }
+
+
 @router.get("/pipeline/contracts")
 async def get_contracts():
     """Contract expiry status for all tracked instruments."""
@@ -442,6 +559,109 @@ async def get_command_center():
     from app.pipeline import pipeline_manager
     summaries = pipeline_manager.get_all_summaries()
     return {"assets": summaries, "count": len(summaries)}
+
+
+@router.get("/pipeline/asset-settings")
+async def get_asset_settings(
+    user_id: int = Query(None, description="User ID (admin can query any user)"),
+):
+    """Get per-asset trading mode settings for a user."""
+    from app.database import async_session
+    from sqlalchemy import select
+    from app.models.user import UserAssetSettings
+
+    async with async_session() as session:
+        stmt = select(UserAssetSettings)
+        if user_id:
+            stmt = stmt.where(UserAssetSettings.user_id == user_id)
+        result = await session.execute(stmt)
+        settings_list = result.scalars().all()
+
+    return {
+        "settings": [
+            {
+                "id": s.id,
+                "user_id": s.user_id,
+                "symbol": s.symbol,
+                "exchange": s.exchange,
+                "trading_mode": s.trading_mode,
+                "is_active": s.is_active,
+                "max_risk_pct_override": s.max_risk_pct_override,
+            }
+            for s in settings_list
+        ]
+    }
+
+
+@router.put("/pipeline/asset-settings/{symbol}")
+async def update_asset_settings(
+    symbol: str,
+    exchange: str = Query("NFO"),
+    trading_mode: str = Query(None, regex="^(PAPER|LIVE)$"),
+    is_active: bool = Query(None),
+    user_id: int = Query(1, description="User ID"),
+):
+    """Toggle per-asset trading mode (PAPER/LIVE) or active status.
+
+    If no settings exist for this user+asset, creates a new record.
+    """
+    from app.database import async_session
+    from sqlalchemy import select
+    from app.models.user import UserAssetSettings, User
+
+    async with async_session() as session:
+        # Verify user is approved for LIVE if switching to LIVE
+        if trading_mode == "LIVE":
+            user_result = await session.execute(select(User).where(User.id == user_id))
+            user = user_result.scalar_one_or_none()
+            if not user or not user.approved_for_live:
+                raise HTTPException(
+                    status_code=403,
+                    detail="User not approved for LIVE trading. Request approval from admin.",
+                )
+
+        # Find or create settings record
+        stmt = select(UserAssetSettings).where(
+            UserAssetSettings.user_id == user_id,
+            UserAssetSettings.symbol == symbol,
+            UserAssetSettings.exchange == exchange,
+        )
+        result = await session.execute(stmt)
+        asset_settings = result.scalar_one_or_none()
+
+        if not asset_settings:
+            asset_settings = UserAssetSettings(
+                user_id=user_id, symbol=symbol, exchange=exchange,
+            )
+            session.add(asset_settings)
+
+        if trading_mode is not None:
+            asset_settings.trading_mode = trading_mode
+        if is_active is not None:
+            asset_settings.is_active = is_active
+
+        await session.commit()
+        await session.refresh(asset_settings)
+
+    # Update live AssetSession's mode if pipeline is running
+    try:
+        from app.pipeline import pipeline_manager
+        key = f"{symbol}:{exchange}" if not user_id else f"{symbol}:{exchange}:u{user_id}"
+        pipe_session = pipeline_manager._sessions.get(key)
+        if not pipe_session:
+            pipe_session = pipeline_manager._sessions.get(f"{symbol}:{exchange}")
+        if pipe_session and pipe_session.active:
+            pipe_session._asset_trading_mode = asset_settings.trading_mode
+            logger.info("Updated live pipeline {} mode to {}", symbol, asset_settings.trading_mode)
+    except Exception:
+        pass
+
+    return {
+        "symbol": symbol,
+        "exchange": exchange,
+        "trading_mode": asset_settings.trading_mode,
+        "is_active": asset_settings.is_active,
+    }
 
 
 @router.get("/pipeline/signals")

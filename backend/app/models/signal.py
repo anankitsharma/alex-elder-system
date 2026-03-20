@@ -1,7 +1,8 @@
 """Signal models for trading alerts."""
 
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, Text
+from typing import Optional
+from sqlalchemy import String, Integer, Float, DateTime, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -11,6 +12,7 @@ class Signal(Base):
     __tablename__ = "signals"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     symbol: Mapped[str] = mapped_column(String(50))
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)

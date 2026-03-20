@@ -75,6 +75,16 @@ class IndicatorEngine:
 
         n = len(df)
 
+        # Minimum bars required for meaningful indicator output
+        # MACD needs 26+9=35 bars, SafeZone needs 22, EMA needs 13
+        MIN_BARS = 35
+        if n < MIN_BARS:
+            logger.debug(
+                "Insufficient data for {} {}: {}/{} bars",
+                self.symbol, self.interval, n, MIN_BARS,
+            )
+            return {"insufficient_data": True, "bars": n, "required": MIN_BARS}
+
         # Cache: skip full recalc if data hasn't changed
         last_close = float(df.iloc[-1].get("close", 0)) if n > 0 else 0
         cache_key = f"{n}:{last_close}:{screen}"

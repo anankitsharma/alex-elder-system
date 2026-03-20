@@ -112,6 +112,10 @@ interface TradingStore {
   setTripleScreen: (result: TripleScreenResult | null) => void;
   clearSignals: () => void;
 
+  // ── Trade Events (toasts for non-signal events) ──
+  tradeEvents: import("@/components/ui/TradeToast").TradeToastData[];
+  addTradeEvent: (event: import("@/components/ui/TradeToast").TradeToastData) => void;
+
   // ── Command Center ──
   commandCenterAssets: import("@/lib/api").CommandCenterAsset[];
   setCommandCenterAssets: (assets: import("@/lib/api").CommandCenterAsset[]) => void;
@@ -137,6 +141,9 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
       candles: [], indicators: null, loading: true,
       runningBar: null, lastUpdate: null,
       screenData: {},
+      tripleScreen: null,
+      activeSignal: null,
+      signals: [],
     });
     setTimeout(() => {
       get().fetchCandles();
@@ -317,6 +324,14 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   },
   setTripleScreen: (result) => set({ tripleScreen: result }),
   clearSignals: () => set({ signals: [], activeSignal: null }),
+
+  // ── Trade Events ──
+  tradeEvents: [],
+  addTradeEvent: (event) => {
+    set((state) => ({
+      tradeEvents: [event, ...state.tradeEvents].slice(0, 20),
+    }));
+  },
 
   // ── Command Center ──
   commandCenterAssets: [],

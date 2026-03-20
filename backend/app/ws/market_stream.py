@@ -14,7 +14,8 @@ router = APIRouter()
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 # Thread-safe tick queue: feed thread appends, async poller consumes
-_tick_queue: list[dict] = []
+import collections
+_tick_queue: collections.deque = collections.deque(maxlen=10000)  # Thread-safe, bounded
 _tick_poller_task: asyncio.Task | None = None
 
 def set_main_loop(loop: asyncio.AbstractEventLoop):
@@ -70,6 +71,19 @@ def on_tick_received(tick_data: Any):
         except (json.JSONDecodeError, TypeError):
             return
 
+    # Validate tick data before queueing
+    ltp = data.get("ltp") or data.get("last_traded_price")
+    if ltp is not None:
+        try:
+            ltp_f = float(ltp)
+            if ltp_f <= 0 or ltp_f > 1e7:
+                return  # Invalid price — skip
+        except (ValueError, TypeError):
+            return
+    token = data.get("token")
+    if not token:
+        return  # No token — skip
+
     # Queue the tick for the async poller to pick up (avoids cross-thread async issues on Windows)
     _tick_queue.append(data)
 
@@ -109,6 +123,10 @@ async def market_websocket(websocket: WebSocket):
 # ── Pipeline event stream (/ws/pipeline) ─────────────────────
 
 _pipeline_clients: list[WebSocket] = []
+
+# Per-user connection tracking (multi-user support)
+_user_connections: dict[int, list[WebSocket]] = {}  # user_id -> [ws1, ws2, ...]
+_ws_user_map: dict[int, int] = {}  # id(ws) -> user_id
 
 
 async def _heartbeat_loop():
@@ -151,7 +169,8 @@ async def _heartbeat_loop():
                                         "bar": bar,
                                     })
 
-                        # Check stop losses (throttled: every 2s per session)
+                        # Check stop losses + targets (throttled: every 2s per session)
+                        now = _time.time()
                         if current_price > 0:
                             sl_key = f"_sl_{key}"
                             last_sl = getattr(_heartbeat_loop, sl_key, 0)
@@ -234,6 +253,46 @@ async def _heartbeat_loop():
             except Exception:
                 pass
 
+        # ── Order fill poller (every 5s, LIVE mode only) ──
+        if not hasattr(_heartbeat_loop, '_last_order_poll'):
+            _heartbeat_loop._last_order_poll = 0.0
+        if now - _heartbeat_loop._last_order_poll >= 5:
+            _heartbeat_loop._last_order_poll = now
+            try:
+                from app.config import settings as _cfg
+                if _cfg.trading_mode == "LIVE":
+                    await _poll_order_fills(pipeline_manager)
+            except Exception as e:
+                logger.debug("Order fill poll error: {}", e)
+
+        # ── EOD auto-close check (every 30s) ──
+        if not hasattr(_heartbeat_loop, '_last_eod_check'):
+            _heartbeat_loop._last_eod_check = 0.0
+        if now - _heartbeat_loop._last_eod_check >= 30:
+            _heartbeat_loop._last_eod_check = now
+            try:
+                await _check_eod_close(pipeline_manager)
+            except Exception as e:
+                logger.debug("EOD check error: {}", e)
+
+        # ── Daily P&L summary (once per day after NSE close) ──
+        if not hasattr(_heartbeat_loop, '_last_daily_summary'):
+            _heartbeat_loop._last_daily_summary = ""
+        try:
+            from datetime import datetime as _dt
+            from app.pipeline.market_hours import IST as _IST
+            _now_ist = _dt.now(_IST)
+            _today = _now_ist.strftime("%Y-%m-%d")
+            _t = _now_ist.time()
+            # Send at 15:35 IST (5 min after NSE close), weekdays only
+            if (_t.hour == 15 and 35 <= _t.minute <= 36
+                    and _now_ist.weekday() < 5
+                    and _heartbeat_loop._last_daily_summary != _today):
+                _heartbeat_loop._last_daily_summary = _today
+                await _send_daily_summary(_today)
+        except Exception:
+            pass
+
         # ── Contract rollover check (every 30 min) ──
         if not hasattr(_heartbeat_loop, '_last_rollover_check'):
             _heartbeat_loop._last_rollover_check = 0.0
@@ -245,6 +304,311 @@ async def _heartbeat_loop():
                 pass
 
         await asyncio.sleep(0.05)  # 50ms poll cycle
+
+
+async def _send_daily_summary(date_str: str):
+    """Compute and send daily P&L summary from today's closed trades."""
+    from app.database import async_session
+    from app.pipeline import db_persistence as db
+    from app.notifications.telegram import notify_daily_summary
+
+    try:
+        async with async_session() as session:
+            month_str = date_str[:7]  # YYYY-MM
+            trades = await db.load_month_trades(session, month_str)
+
+            # Filter to today's trades only
+            today_trades = [t for t in trades
+                           if t.created_at and t.created_at.strftime("%Y-%m-%d") == date_str]
+
+            if not today_trades:
+                return  # No trades today, skip summary
+
+            total_pnl = sum(t.pnl or 0 for t in today_trades)
+            winners = sum(1 for t in today_trades if (t.pnl or 0) > 0)
+            losers = sum(1 for t in today_trades if (t.pnl or 0) < 0)
+            total = len(today_trades)
+            win_rate = (winners / total * 100) if total > 0 else 0
+
+            best = max(today_trades, key=lambda t: t.pnl or 0) if today_trades else None
+            worst = min(today_trades, key=lambda t: t.pnl or 0) if today_trades else None
+
+            # Count open positions
+            positions = await db.load_open_positions(session)
+            open_count = len(positions)
+
+            await notify_daily_summary(
+                date_str=date_str,
+                total_trades=total,
+                winners=winners,
+                losers=losers,
+                total_pnl=total_pnl,
+                win_rate=win_rate,
+                best_trade={"symbol": best.symbol, "pnl": best.pnl} if best and (best.pnl or 0) > 0 else None,
+                worst_trade={"symbol": worst.symbol, "pnl": worst.pnl} if worst and (worst.pnl or 0) < 0 else None,
+                open_positions=open_count,
+            )
+    except Exception as e:
+        logger.debug("Daily summary failed: {}", e)
+
+
+async def _check_eod_close(pipeline_manager):
+    """Close all open positions when market is nearing close (EOD cutoff).
+
+    Checks each active session's exchange-specific close time and triggers
+    position exit when the EOD cutoff is reached.
+    """
+    from datetime import datetime
+    from app.pipeline.market_hours import get_session, get_eod_cutoff, IST
+    from app.database import async_session
+    from app.pipeline import db_persistence as db
+
+    now_ist = datetime.now(IST)
+
+    # Skip weekends and market holidays
+    from app.pipeline.holidays import is_holiday
+    if is_holiday(now_ist.date()):
+        return
+
+    for key, session in pipeline_manager._sessions.items():
+        if not session.active:
+            continue
+
+        cutoff = get_eod_cutoff(session.exchange, session.symbol)
+        mkt_session = get_session(session.exchange, session.symbol)
+        close_time = mkt_session.close_time
+        current_time = now_ist.time()
+
+        # Check if we're past EOD cutoff but before close (5-min window)
+        # For sessions that close same day (not overnight)
+        past_cutoff = False
+        if close_time >= mkt_session.open_time:
+            # Normal session (e.g., NSE 9:15-15:30)
+            past_cutoff = cutoff <= current_time <= close_time
+        else:
+            # Overnight session — cutoff is near midnight
+            past_cutoff = current_time >= cutoff or current_time <= close_time
+
+        if not past_cutoff:
+            continue
+
+        # Check if we already did EOD close for this session today
+        eod_key = f"_eod_done_{key}_{now_ist.date()}"
+        if getattr(_check_eod_close, eod_key, False):
+            continue
+        setattr(_check_eod_close, eod_key, True)
+
+        # Close all open positions for this symbol
+        try:
+            async with async_session() as db_session:
+                positions = await db.load_open_positions_by_symbol(db_session, session.symbol)
+                for pos in positions:
+                    # Get current price from running bar
+                    current_price = 0
+                    for tf, builder in session.candle_builders.items():
+                        bar = builder.running_bar
+                        if bar:
+                            current_price = bar.get("close", 0)
+                            break
+
+                    if current_price <= 0:
+                        continue
+
+                    # Place live exit order if LIVE mode
+                    if pos.mode == "LIVE":
+                        try:
+                            from app.trading.live import LivePlacer
+                            placer = LivePlacer()
+                            exit_dir = "SELL" if pos.direction == "LONG" else "BUY"
+                            await placer.place_exit(
+                                symbol=session.symbol, token=session.token,
+                                exchange=session.exchange, direction=exit_dir,
+                                quantity=pos.quantity, order_type="MARKET",
+                                price=current_price, product_type="CARRYFORWARD",
+                            )
+                        except Exception as e:
+                            logger.error("LIVE EOD exit failed for {}: {}", session.symbol, e)
+                            continue
+
+                    trade = await db.close_position(db_session, pos.id, current_price)
+                    if trade:
+                        pnl = (current_price - pos.entry_price) * pos.quantity if pos.direction == "LONG" \
+                            else (pos.entry_price - current_price) * pos.quantity
+                        logger.info(
+                            "EOD CLOSE: {} {} @ {:.2f} P&L={:.2f} (cutoff={})",
+                            pos.direction, session.symbol, current_price, pnl, cutoff,
+                        )
+                        await broadcast_pipeline_event({
+                            "type": "position_closed",
+                            "symbol": session.symbol,
+                            "direction": pos.direction,
+                            "entry_price": pos.entry_price,
+                            "exit_price": current_price,
+                            "quantity": pos.quantity,
+                            "pnl": round(pnl, 2),
+                            "reason": "EOD",
+                        })
+                        # Notification
+                        try:
+                            from app.notifications.telegram import notify_position_closed
+                            await notify_position_closed(
+                                symbol=session.symbol,
+                                direction=pos.direction,
+                                entry_price=pos.entry_price,
+                                exit_price=current_price,
+                                quantity=pos.quantity,
+                                pnl=round(pnl, 2),
+                                reason="EOD",
+                                stop_price=pos.stop_price or 0,
+                                target_price=pos.target_price or 0,
+                                mode=pos.mode or "PAPER",
+                            )
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error("EOD close failed for {}: {}", session.symbol, e)
+
+
+async def _poll_order_fills(pipeline_manager):
+    """Poll Angel One order book and update pending orders with fill status.
+
+    Runs every 5s in LIVE mode. Matches broker order IDs against our DB
+    pending orders and confirms fills.
+    """
+    import asyncio
+    from app.broker.angel_client import angel
+    from app.database import async_session
+    from app.pipeline import db_persistence as db
+
+    try:
+        order_book = await asyncio.wait_for(
+            asyncio.to_thread(angel.get_order_book),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Order book fetch timed out (15s)")
+        return
+    except Exception as e:
+        logger.debug("Order book fetch failed: {}", e)
+        return
+
+    if not order_book or not isinstance(order_book, dict):
+        return
+
+    orders = order_book.get("data", [])
+    if not isinstance(orders, list):
+        return
+
+    # Build lookup: broker_order_id -> broker status
+    broker_fills = {}
+    for o in orders:
+        oid = str(o.get("orderid", ""))
+        status = o.get("orderstatus", "").upper()
+        filled_qty = int(o.get("filledshares", 0) or 0)
+        avg_price = float(o.get("averageprice", 0) or 0)
+
+        if oid and status in ("COMPLETE", "FILLED", "REJECTED", "CANCELLED"):
+            broker_fills[oid] = {
+                "status": "COMPLETE" if status in ("COMPLETE", "FILLED") else status,
+                "filled_price": avg_price,
+                "filled_quantity": filled_qty,
+            }
+        elif oid and status == "OPEN" and filled_qty > 0:
+            # Partial fill — order still open but some shares filled
+            broker_fills[oid] = {
+                "status": "PARTIAL",
+                "filled_price": avg_price,
+                "filled_quantity": filled_qty,
+            }
+
+    if not broker_fills:
+        return
+
+    # Update our pending orders
+    try:
+        async with async_session() as session:
+            pending = await db.load_pending_orders(session)
+            for order in pending:
+                fill = broker_fills.get(order.order_id)
+                if not fill:
+                    continue
+
+                if fill["status"] == "COMPLETE":
+                    await db.update_order_fill(
+                        session, order.id,
+                        filled_price=fill["filled_price"],
+                        filled_quantity=fill["filled_quantity"],
+                        status="COMPLETE",
+                    )
+                    logger.info(
+                        "[LIVE] Order {} filled @ {} qty={}",
+                        order.order_id, fill["filled_price"], fill["filled_quantity"],
+                    )
+                    # Confirm fill with executor
+                    sym = order.symbol
+                    for key, sess in pipeline_manager._sessions.items():
+                        if sess.symbol == sym:
+                            sess.executor.confirm_entry_fill(sym, fill["filled_price"], fill["filled_quantity"])
+                            break
+                    # Broadcast fill event to frontend
+                    await broadcast_pipeline_event({
+                        "type": "order_filled",
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "filled_price": fill["filled_price"],
+                        "filled_quantity": fill["filled_quantity"],
+                    })
+
+                elif fill["status"] == "PARTIAL":
+                    # Update with partial fill info but keep PENDING
+                    await db.update_order_fill(
+                        session, order.id,
+                        filled_price=fill["filled_price"],
+                        filled_quantity=fill["filled_quantity"],
+                        status="PENDING",  # Keep pending until fully filled
+                    )
+                    logger.info(
+                        "[LIVE] Order {} PARTIAL fill: {} of {} @ {}",
+                        order.order_id, fill["filled_quantity"], order.quantity, fill["filled_price"],
+                    )
+                    await broadcast_pipeline_event({
+                        "type": "order_partial_fill",
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "filled_price": fill["filled_price"],
+                        "filled_quantity": fill["filled_quantity"],
+                        "total_quantity": order.quantity,
+                    })
+
+                elif fill["status"] in ("REJECTED", "CANCELLED"):
+                    await db.update_order_fill(
+                        session, order.id,
+                        status=fill["status"],
+                    )
+                    logger.warning(
+                        "[LIVE] Order {} {}: {}",
+                        order.order_id, fill["status"], order.symbol,
+                    )
+                    await broadcast_pipeline_event({
+                        "type": "order_rejected",
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "status": fill["status"],
+                    })
+                    # Notification
+                    try:
+                        from app.notifications.telegram import notify_order_rejected
+                        await notify_order_rejected(
+                            symbol=order.symbol,
+                            direction=order.direction,
+                            quantity=order.quantity,
+                            reason=f"Broker {fill['status']}: order {order.order_id}",
+                            mode="LIVE",
+                        )
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug("Order fill update failed: {}", e)
 
 
 def _ensure_heartbeat():
@@ -271,17 +635,54 @@ async def broadcast_pipeline_event(event: dict):
         _pipeline_clients.remove(ws)
 
 
+async def broadcast_user_event(user_id: int, event: dict):
+    """Send a private event to a specific user's WebSocket connections only."""
+    connections = _user_connections.get(user_id, [])
+    if not connections:
+        return
+
+    message = json.dumps(event, default=str)
+    disconnected = []
+    for ws in connections:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        connections.remove(ws)
+
+
 @router.websocket("/ws/pipeline")
 async def pipeline_websocket(websocket: WebSocket):
     """WebSocket endpoint for structured pipeline events.
 
+    Supports optional JWT auth via ?token= query param for multi-user.
+    Unauthenticated connections still work (backward compat) but get all events.
+
     Event types: candle, indicators, signal, order, pipeline_status,
                  running_bar, trade_alert, heartbeat
     """
+    # Authenticate if token provided (optional for backward compat)
+    user_id = None
+    try:
+        from app.middleware.auth import get_ws_user
+        user = await get_ws_user(websocket)
+        if user:
+            user_id = user.id
+    except Exception:
+        pass
+
     await websocket.accept()
     _pipeline_clients.append(websocket)
+
+    # Register per-user connection
+    if user_id:
+        _user_connections.setdefault(user_id, []).append(websocket)
+        _ws_user_map[id(websocket)] = user_id
+
     _ensure_heartbeat()
-    logger.info("Pipeline WS client connected (total: {})", len(_pipeline_clients))
+    logger.info("Pipeline WS client connected (user={}, total: {})",
+                user_id or "anon", len(_pipeline_clients))
 
     try:
         # Send current pipeline status on connect
@@ -369,4 +770,14 @@ async def pipeline_websocket(websocket: WebSocket):
     finally:
         if websocket in _pipeline_clients:
             _pipeline_clients.remove(websocket)
-        logger.info("Pipeline WS client disconnected (total: {})", len(_pipeline_clients))
+        # Clean up per-user tracking
+        ws_id = id(websocket)
+        uid = _ws_user_map.pop(ws_id, None)
+        if uid and uid in _user_connections:
+            conns = _user_connections[uid]
+            if websocket in conns:
+                conns.remove(websocket)
+            if not conns:
+                del _user_connections[uid]
+        logger.info("Pipeline WS client disconnected (user={}, total: {})",
+                    uid or "anon", len(_pipeline_clients))

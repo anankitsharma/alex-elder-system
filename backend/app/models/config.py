@@ -1,7 +1,8 @@
 """Configuration and portfolio risk tracking models."""
 
 from datetime import datetime, date
-from sqlalchemy import String, Integer, Float, DateTime, Date, Boolean, Text
+from typing import Optional
+from sqlalchemy import String, Integer, Float, DateTime, Date, Boolean, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -22,6 +23,7 @@ class PortfolioRisk(Base):
     __tablename__ = "portfolio_risk"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     date: Mapped[date] = mapped_column(Date, index=True)
     month_start_equity: Mapped[float] = mapped_column(Float)
     current_equity: Mapped[float] = mapped_column(Float)

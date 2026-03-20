@@ -1,7 +1,8 @@
 """Order, Position, and Trade journal models."""
 
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, Boolean, Text
+from typing import Optional
+from sqlalchemy import String, Integer, Float, DateTime, Boolean, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -11,6 +12,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     signal_id: Mapped[int] = mapped_column(Integer, nullable=True)
     instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     symbol: Mapped[str] = mapped_column(String(50))
@@ -32,6 +34,7 @@ class Position(Base):
     __tablename__ = "positions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     symbol: Mapped[str] = mapped_column(String(50))
     direction: Mapped[str] = mapped_column(String(10))  # LONG, SHORT
@@ -53,6 +56,7 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     position_id: Mapped[int] = mapped_column(Integer, nullable=True)
     instrument_id: Mapped[int] = mapped_column(Integer, index=True)
     symbol: Mapped[str] = mapped_column(String(50))

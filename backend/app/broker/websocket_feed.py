@@ -18,10 +18,10 @@ MODE_LTP = 1       # Last Traded Price only
 MODE_QUOTE = 2     # OHLC + volume
 MODE_SNAP = 3      # Full market depth
 
-# Reconnection settings
-MAX_RECONNECT_ATTEMPTS = 10
+# Reconnection settings — infinite retry (never give up)
 RECONNECT_BASE_DELAY = 2  # seconds
-RECONNECT_MAX_DELAY = 60  # seconds
+RECONNECT_MAX_DELAY = 300  # 5 min cap
+STALE_DATA_TIMEOUT = 60  # seconds with no data → force reconnect
 
 
 class MarketFeed:
@@ -76,23 +76,24 @@ class MarketFeed:
     def _on_close(self, ws):
         logger.warning("Market feed WebSocket closed")
         self._running = False
-        # Auto-reconnect with exponential backoff
-        if self._should_reconnect and self._reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+        # Auto-reconnect with exponential backoff + jitter (infinite retry)
+        if self._should_reconnect:
+            import random
             delay = min(
-                RECONNECT_BASE_DELAY * (2 ** self._reconnect_attempts),
+                RECONNECT_BASE_DELAY * (2 ** min(self._reconnect_attempts, 8)),
                 RECONNECT_MAX_DELAY,
             )
+            # Add jitter: ±25% to prevent reconnect storms
+            delay *= (0.75 + random.random() * 0.5)
             self._reconnect_attempts += 1
             logger.info(
-                "Reconnecting market feed in {}s (attempt {}/{})",
-                delay, self._reconnect_attempts, MAX_RECONNECT_ATTEMPTS,
+                "Reconnecting market feed in {:.1f}s (attempt {})",
+                delay, self._reconnect_attempts,
             )
             self._reconnect_thread = threading.Thread(
                 target=self._delayed_reconnect, args=(delay,), daemon=True
             )
             self._reconnect_thread.start()
-        elif self._reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
-            logger.error("Max reconnect attempts ({}) reached. Market feed offline.", MAX_RECONNECT_ATTEMPTS)
 
     def _delayed_reconnect(self, delay: float):
         """Reconnect after a delay (runs in background thread)."""
@@ -141,8 +142,20 @@ class MarketFeed:
             self._ws.unsubscribe("abc123", MODE_QUOTE, token_list)
 
     def connect(self):
-        """Initialize and connect the WebSocket."""
+        """Initialize and connect the WebSocket.
+
+        On reconnect, refreshes auth/feed tokens from broker session
+        to handle session expiry.
+        """
         try:
+            # Refresh tokens if this is a reconnect attempt
+            if self._reconnect_attempts > 0:
+                try:
+                    angel.refresh_session()
+                    logger.info("Refreshed broker session tokens for feed reconnect")
+                except Exception as e:
+                    logger.warning("Token refresh failed (using existing): {}", e)
+
             self._ws = SmartWebSocketV2(
                 auth_token=angel.auth_token,
                 api_key=settings.angel_feed_api_key,
@@ -182,6 +195,29 @@ class MarketFeed:
         if self._last_data_time == 0:
             return -1
         return time.time() - self._last_data_time
+
+    def check_stale_and_reconnect(self):
+        """Force reconnect if no data received for STALE_DATA_TIMEOUT seconds.
+
+        Call this periodically from the heartbeat loop. Only triggers during
+        market hours when we expect data flow.
+        """
+        if not self._running or not self._should_reconnect:
+            return
+        age = self.last_data_age
+        if age > STALE_DATA_TIMEOUT and age != -1:
+            logger.warning(
+                "Market feed stale ({:.0f}s no data) — forcing reconnect",
+                age,
+            )
+            self._running = False
+            try:
+                if self._ws:
+                    self._ws.close_connection()
+            except Exception:
+                pass
+            # Trigger reconnect
+            self._on_close(self._ws)
 
 
 # Singleton

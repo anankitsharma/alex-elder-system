@@ -10,11 +10,7 @@ from typing import Callable, Optional
 import pytz
 from loguru import logger
 
-IST = pytz.timezone("Asia/Kolkata")
-
-# NSE market hours (IST)
-MARKET_OPEN = dt_time(9, 15)
-MARKET_CLOSE = dt_time(15, 30)
+from app.pipeline.market_hours import get_session, MarketSession, IST
 
 # Timeframe → minutes (intraday only)
 TIMEFRAME_MINUTES = {
@@ -39,27 +35,28 @@ def _floor_timestamp(dt: datetime, minutes: int) -> datetime:
     return dt.replace(minute=minute, second=0, microsecond=0)
 
 
-def _is_market_hours(dt: datetime) -> bool:
-    """Check if timestamp falls within NSE market hours."""
-    if dt.tzinfo is None:
-        dt = IST.localize(dt)
-    else:
-        dt = dt.astimezone(IST)
-    t = dt.time()
-    return MARKET_OPEN <= t <= MARKET_CLOSE
-
-
 class CandleBuilder:
     """Aggregates ticks into OHLCV bars for a single timeframe."""
 
-    def __init__(self, timeframe: str, on_bar_close: Optional[Callable] = None):
+    def __init__(
+        self,
+        timeframe: str,
+        on_bar_close: Optional[Callable] = None,
+        exchange: str = "NSE",
+        symbol: str = "",
+    ):
         """
         Args:
             timeframe: Bar size (1m, 5m, 15m, 30m, 1h, 1d)
             on_bar_close: Callback(timeframe, bar_dict) when a bar completes
+            exchange: Exchange code (NSE, NFO, MCX, etc.) for market hours
+            symbol: Trading symbol (needed for MCX agri/non-agri classification)
         """
         self.timeframe = timeframe
         self.on_bar_close = on_bar_close
+        self.exchange = exchange
+        self.symbol = symbol
+        self._market_session: MarketSession = get_session(exchange, symbol)
 
         self._current_bar: Optional[dict] = None
         self._current_period: Optional[datetime] = None
@@ -112,7 +109,7 @@ class CandleBuilder:
             now = IST.localize(now)
 
         # Skip ticks outside market hours for intraday
-        if self._interval_minutes > 0 and not _is_market_hours(now):
+        if self._interval_minutes > 0 and not self._market_session.is_open(now):
             return None
 
         # Calculate volume delta from cumulative
@@ -131,8 +128,9 @@ class CandleBuilder:
         else:
             # Daily: period is the date at market close
             ist_now = now.astimezone(IST)
+            close = self._market_session.close_time
             bar_period = ist_now.replace(
-                hour=15, minute=30, second=0, microsecond=0
+                hour=close.hour, minute=close.minute, second=0, microsecond=0
             )
 
         completed_bar = None

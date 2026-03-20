@@ -19,15 +19,34 @@ async function apiFetch<T>(
     const timer = setTimeout(() => controller.abort(), timeout);
 
     try {
+      // Attach auth token if present
+      const authHeaders: Record<string, string> = { "Content-Type": "application/json", ...fetchInit?.headers as Record<string, string> };
+      if (typeof window !== 'undefined') {
+        const token = localStorage.getItem('elder_token');
+        if (token) {
+          authHeaders['Authorization'] = `Bearer ${token}`;
+        }
+      }
+
       const res = await fetch(`${BASE}${path}`, {
         ...fetchInit,
         signal: controller.signal,
-        headers: { "Content-Type": "application/json", ...fetchInit?.headers },
+        headers: authHeaders,
       });
 
       clearTimeout(timer);
 
       if (!res.ok) {
+        // Handle 401 — clear auth state
+        if (res.status === 401) {
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('elder_token');
+            // Dynamically import to avoid circular deps
+            import('@/store/useAuthStore').then(({ useAuthStore }) => {
+              useAuthStore.getState().logout();
+            });
+          }
+        }
         // Don't retry client errors (4xx)
         if (res.status >= 400 && res.status < 500) {
           const body = await res.json().catch(() => ({}));
@@ -260,6 +279,7 @@ export interface CommandCenterAsset {
   confidence: number | null;
   entry_price: number | null;
   stop_price: number | null;
+  trading_mode?: string;
   active: boolean;
   screen_timeframes: Record<string, string>;
   alignment: {
@@ -311,6 +331,10 @@ export function fetchCommandCenter() {
   return apiFetch<{ assets: CommandCenterAsset[]; count: number }>(
     "/api/strategy/pipeline/command-center"
   );
+}
+
+export async function toggleAssetMode(symbol: string, exchange: string, mode: string, userId: number = 1) {
+  return apiFetch(`/api/strategy/pipeline/asset-settings/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}&trading_mode=${mode}&user_id=${userId}`, { method: 'PUT' });
 }
 
 // ── Health ──────────────────────────────────────────────────
@@ -584,11 +608,15 @@ export function fetchPipelineAnalysis(symbol: string, exchange = "NSE") {
 
 // ── WebSocket ───────────────────────────────────────────────
 export function createMarketSocket(): WebSocket {
-  const wsUrl = BASE.replace(/^http/, "ws") + "/ws/market";
+  const token = typeof window !== 'undefined' ? localStorage.getItem('elder_token') : null;
+  const tokenParam = token ? `?token=${token}` : '';
+  const wsUrl = BASE.replace(/^http/, "ws") + "/ws/market" + tokenParam;
   return new WebSocket(wsUrl);
 }
 
 export function createPipelineSocket(): WebSocket {
-  const wsUrl = BASE.replace(/^http/, "ws") + "/ws/pipeline";
+  const token = typeof window !== 'undefined' ? localStorage.getItem('elder_token') : null;
+  const tokenParam = token ? `?token=${token}` : '';
+  const wsUrl = BASE.replace(/^http/, "ws") + "/ws/pipeline" + tokenParam;
   return new WebSocket(wsUrl);
 }

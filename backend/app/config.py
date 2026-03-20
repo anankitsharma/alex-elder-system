@@ -22,19 +22,34 @@ class Settings(BaseSettings):
     angel_feed_api_key: str = ""
     angel_feed_api_secret: str = ""
 
-    # Telegram
+    # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    discord_webhook_url: str = ""  # Discord webhook for trade alerts
 
     # App settings
+    # PostgreSQL: "postgresql+asyncpg://user:pass@localhost:5432/elder_trading"
+    # SQLite (default for dev): "sqlite+aiosqlite:///./elder_trading.db"
     db_url: str = "sqlite+aiosqlite:///./elder_trading.db"
     log_level: str = "INFO"
-    trading_mode: str = "PAPER"  # PAPER or LIVE
+    trading_mode: str = "PAPER"  # PAPER or LIVE (global default, per-user overrides)
+
+    # Auth (multi-user)
+    jwt_secret: str = "elder-dev-secret-change-in-production"
+    jwt_expire_minutes: int = 1440  # 24 hours
+    credential_encryption_key: str = ""  # Fernet key for encrypting broker creds
 
     # Risk defaults
     max_risk_per_trade_pct: float = 2.0
     max_portfolio_risk_pct: float = 6.0
     min_signal_score: int = 65
+    paper_starting_capital: float = 100000.0  # Default equity for PAPER mode
+
+    # Anti-spam alert thresholds
+    tide_dead_zone: float = 0.005       # MACD-H slope below this → NEUTRAL
+    wave_fi2_dead_zone: float = 0.01    # Force Index(2) abs below this → 0
+    flip_confirm_bars: int = 2           # Consecutive bars to confirm tide flip
+    wave_confirm_bars: int = 2           # Consecutive bars to confirm wave change
 
     # Rate limiting
     max_orders_per_minute: int = 10

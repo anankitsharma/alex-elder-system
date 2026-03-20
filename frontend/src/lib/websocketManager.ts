@@ -12,6 +12,7 @@
  */
 
 import { useTradingStore } from "@/store/useTradingStore";
+import { useNotificationStore } from "@/store/useNotificationStore";
 import type { CandleData, IndicatorData } from "@/lib/api";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -82,7 +83,9 @@ export class WebSocketManager {
     store.setWsState("connecting");
 
     try {
-      this.pipelineWs = new WebSocket(`${WS_BASE}/ws/pipeline`);
+      const token = typeof window !== 'undefined' ? localStorage.getItem('elder_token') : null;
+      const tokenParam = token ? `?token=${token}` : '';
+      this.pipelineWs = new WebSocket(`${WS_BASE}/ws/pipeline${tokenParam}`);
     } catch {
       this.schedulePipelineReconnect();
       return;
@@ -100,21 +103,21 @@ export class WebSocketManager {
       this.resetHeartbeat();
 
       // Resubscribe to tracked symbol on reconnect
-      if (this.trackedSymbol) {
+      if (this.trackedSymbol && this.pipelineWs?.readyState === WebSocket.OPEN) {
         this.sendPipelineAction("start_tracking", {
           symbol: this.trackedSymbol,
           exchange: this.trackedExchange,
         });
-      }
 
-      // Request backfill if we were disconnected
-      if (wasDisconnected && this.trackedSymbol) {
-        const since = new Date(wasDisconnected).toISOString();
-        this.sendPipelineAction("backfill", {
-          symbol: this.trackedSymbol,
-          exchange: this.trackedExchange,
-          since,
-        });
+        // Request backfill if we were disconnected
+        if (wasDisconnected) {
+          const since = new Date(wasDisconnected).toISOString();
+          this.sendPipelineAction("backfill", {
+            symbol: this.trackedSymbol,
+            exchange: this.trackedExchange,
+            since,
+          });
+        }
       }
 
       this.disconnectedSince = null;
@@ -148,6 +151,7 @@ export class WebSocketManager {
 
   private handlePipelineMessage(msg: Record<string, unknown>) {
     const store = useTradingStore.getState();
+    const notifStore = useNotificationStore.getState();
     const type = msg.type as string;
 
     switch (type) {
@@ -233,16 +237,26 @@ export class WebSocketManager {
       }
 
       case "trade_alert": {
+        const sym = msg.symbol as string;
+        const action = msg.action as string;
+        const grade = msg.grade as string;
+        const conf = msg.confidence as number;
         store.addSignal({
-          symbol: msg.symbol as string,
-          action: msg.action as string,
-          grade: msg.grade as string,
-          confidence: msg.confidence as number,
+          symbol: sym, action, grade, confidence: conf,
           entry_price: msg.entry_price as number | undefined,
           stop_price: msg.stop_price as number | undefined,
           shares: msg.shares as number | undefined,
           signal_id: msg.signal_id as number | undefined,
           timestamp: new Date().toISOString(),
+        });
+        notifStore.addNotification({
+          category: "signal",
+          priority: "normal",
+          title: `${action} ${sym}`,
+          message: `Grade ${grade} | Confidence ${conf}%`,
+          detail: msg.entry_price ? `Entry ₹${Number(msg.entry_price).toFixed(2)}` : undefined,
+          symbol: sym,
+          icon: action === "BUY" ? "🟢" : "🔴",
         });
         break;
       }
@@ -250,6 +264,123 @@ export class WebSocketManager {
       case "order": {
         store.refreshPositions();
         store.refreshOrders();
+        const orderMode = (msg.mode as string) || "PAPER";
+        const orderStatus = (msg.status as string) || "COMPLETE";
+        const orderSym = msg.symbol as string;
+        if (orderStatus === "COMPLETE") {
+          store.addTradeEvent({
+            type: "order_filled",
+            symbol: orderSym,
+            message: `${msg.direction} x${msg.quantity} @ ₹${Number(msg.price || 0).toFixed(2)}`,
+            detail: `Stop: ₹${Number(msg.stop_price || 0).toFixed(2)} | ${orderMode}`,
+          });
+          notifStore.addNotification({
+            category: "trade",
+            priority: orderMode === "LIVE" ? "high" : "normal",
+            title: `Trade: ${msg.direction} ${orderSym}`,
+            message: `Qty ${msg.quantity} @ ₹${Number(msg.price || 0).toFixed(2)}`,
+            detail: `Stop ₹${Number(msg.stop_price || 0).toFixed(2)} | Target ₹${Number(msg.target_price || 0).toFixed(2)}`,
+            symbol: orderSym,
+            icon: msg.direction === "BUY" ? "📈" : "📉",
+          });
+        }
+        break;
+      }
+
+      case "order_filled": {
+        store.refreshPositions();
+        store.refreshOrders();
+        const filledSym = msg.symbol as string;
+        store.addTradeEvent({
+          type: "order_filled",
+          symbol: filledSym,
+          message: `Filled @ ₹${Number(msg.filled_price || 0).toFixed(2)} x${msg.filled_quantity}`,
+        });
+        notifStore.addNotification({
+          category: "trade",
+          priority: "normal",
+          title: `Order Filled: ${filledSym}`,
+          message: `₹${Number(msg.filled_price || 0).toFixed(2)} x${msg.filled_quantity}`,
+          symbol: filledSym,
+          icon: "✅",
+        });
+        break;
+      }
+
+      case "order_rejected": {
+        const rejSym = msg.symbol as string;
+        store.addTradeEvent({
+          type: "order_rejected",
+          symbol: rejSym,
+          message: `Order ${msg.order_id || ""} ${msg.status || "REJECTED"}`,
+          detail: (msg.reason as string) || undefined,
+        });
+        notifStore.addNotification({
+          category: "error",
+          priority: "critical",
+          title: `Order Rejected: ${rejSym}`,
+          message: `${msg.order_id || ""} ${msg.status || "REJECTED"}`,
+          detail: (msg.reason as string) || undefined,
+          symbol: rejSym,
+          icon: "❌",
+        });
+        break;
+      }
+
+      case "order_partial_fill": {
+        const partSym = msg.symbol as string;
+        store.addTradeEvent({
+          type: "order_partial_fill",
+          symbol: partSym,
+          message: `${msg.filled_quantity}/${msg.total_quantity} filled @ ₹${Number(msg.filled_price || 0).toFixed(2)}`,
+        });
+        notifStore.addNotification({
+          category: "trade",
+          priority: "normal",
+          title: `Partial Fill: ${partSym}`,
+          message: `${msg.filled_quantity}/${msg.total_quantity} @ ₹${Number(msg.filled_price || 0).toFixed(2)}`,
+          symbol: partSym,
+          icon: "⏳",
+        });
+        break;
+      }
+
+      case "position_closed": {
+        store.refreshPositions();
+        const closeSym = msg.symbol as string;
+        const pnl = msg.pnl as number;
+        const reason = msg.reason as string;
+        store.addTradeEvent({
+          type: "position_closed",
+          symbol: closeSym,
+          message: `${msg.direction} closed @ ₹${Number(msg.exit_price || 0).toFixed(2)}`,
+          reason, pnl,
+        });
+        const reasonIcons: Record<string, string> = {
+          STOP_LOSS: "🛑", TARGET: "🎯", EOD: "🔔", FLIP: "🔄",
+        };
+        notifStore.addNotification({
+          category: "position",
+          priority: "high",
+          title: `${reason === "TARGET" ? "Target Hit" : reason === "STOP_LOSS" ? "Stop Hit" : reason === "EOD" ? "EOD Close" : reason}: ${closeSym}`,
+          message: `${msg.direction} @ ₹${Number(msg.exit_price || 0).toFixed(2)}`,
+          detail: `Entry ₹${Number(msg.entry_price || 0).toFixed(2)}`,
+          symbol: closeSym,
+          pnl,
+          icon: reasonIcons[reason] || "📤",
+        });
+        break;
+      }
+
+      case "trailing_stop_updated": {
+        const tsSym = msg.symbol as string;
+        store.addTradeEvent({
+          type: "trailing_stop",
+          symbol: tsSym,
+          message: `Stop: ₹${Number(msg.old_stop || 0).toFixed(2)} → ₹${Number(msg.new_stop || 0).toFixed(2)}`,
+          detail: `LTP: ₹${Number(msg.ltp || 0).toFixed(2)}`,
+        });
+        // Low priority — don't push to notification center (too noisy)
         break;
       }
 
@@ -385,7 +516,9 @@ export class WebSocketManager {
   private connectMarket() {
     if (this.destroyed) return;
     try {
-      this.marketWs = new WebSocket(`${WS_BASE}/ws/market`);
+      const token = typeof window !== 'undefined' ? localStorage.getItem('elder_token') : null;
+      const tokenParam = token ? `?token=${token}` : '';
+      this.marketWs = new WebSocket(`${WS_BASE}/ws/market${tokenParam}`);
     } catch {
       setTimeout(() => this.connectMarket(), 5000);
       return;

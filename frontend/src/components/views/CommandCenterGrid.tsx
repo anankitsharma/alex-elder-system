@@ -1,6 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import type { CommandCenterAsset } from "@/lib/api";
+import { toggleAssetMode, fetchCommandCenter } from "@/lib/api";
+import { useAuthStore } from "@/store/useAuthStore";
+import { useTradingStore } from "@/store/useTradingStore";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 
@@ -49,6 +53,63 @@ function AlignmentDots({ alignment }: { alignment: CommandCenterAsset["alignment
   );
 }
 
+function ModeBadge({ asset }: { asset: CommandCenterAsset }) {
+  const user = useAuthStore((s) => s.user);
+  const setCommandCenterAssets = useTradingStore((s) => s.setCommandCenterAssets);
+  const [toggling, setToggling] = useState(false);
+
+  const mode = asset.trading_mode ?? "PAPER";
+  const isLive = mode === "LIVE";
+  const approvedForLive = user?.approved_for_live ?? false;
+
+  const handleToggle = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // Don't trigger row click
+    if (toggling) return;
+    if (!approvedForLive) return;
+
+    const newMode = isLive ? "PAPER" : "LIVE";
+    setToggling(true);
+    try {
+      await toggleAssetMode(asset.symbol, asset.exchange, newMode);
+      // Refresh command center data
+      const cc = await fetchCommandCenter();
+      setCommandCenterAssets(cc.assets);
+    } catch {
+      // Toggle failed — ignore, UI stays as-is
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  if (!approvedForLive) {
+    return (
+      <span
+        className="inline-block px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/20 text-amber-400 cursor-default"
+        title="LIVE trading not approved for your account"
+      >
+        PAPER
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={handleToggle}
+      disabled={toggling}
+      className={cn(
+        "inline-block px-1.5 py-0.5 rounded-full text-[9px] font-bold transition-colors",
+        toggling && "opacity-50",
+        isLive
+          ? "bg-red-500/80 text-white hover:bg-red-500"
+          : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30",
+      )}
+      title={`Click to switch to ${isLive ? "PAPER" : "LIVE"} mode`}
+    >
+      {toggling ? "..." : mode}
+    </button>
+  );
+}
+
 export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
   if (assets.length === 0) {
     return (
@@ -81,6 +142,7 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
             <th className="text-center py-1.5 px-2 font-medium">Signal</th>
             <th className="text-center py-1.5 px-2 font-medium">Grade</th>
             <th className="text-right py-1.5 px-2 font-medium">Conf</th>
+            <th className="text-center py-1.5 px-2 font-medium">Mode</th>
             <th className="text-center py-1.5 px-2 font-medium">Expiry</th>
             <th className="text-right py-1.5 px-2 font-medium">Entry</th>
             <th className="text-right py-1.5 px-2 font-medium">Stop</th>
@@ -164,6 +226,11 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
                       <span className="text-muted w-6 text-right">{a.confidence}%</span>
                     </div>
                   ) : "—"}
+                </td>
+
+                {/* Mode */}
+                <td className="text-center py-2 px-2">
+                  <ModeBadge asset={a} />
                 </td>
 
                 {/* Expiry */}

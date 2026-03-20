@@ -32,6 +32,8 @@ from app.api.scanner import router as scanner_router
 from app.api.indicators import router as indicators_router
 from app.api.strategy import router as strategy_router
 from app.api.settings import router as settings_router
+from app.api.auth import router as auth_router
+from app.api.admin import router as admin_router
 from app.ws.market_stream import router as ws_router
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -91,6 +93,10 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await init_db()
     logger.info("Database initialized")
+
+    # Seed roles and permissions (idempotent — skips if already exist)
+    from app.seed import seed_roles_and_permissions
+    await seed_roles_and_permissions()
 
     # Store main event loop for thread-safe scheduling from feed callbacks
     set_main_loop(asyncio.get_running_loop())
@@ -218,6 +224,8 @@ app.include_router(scanner_router)
 app.include_router(indicators_router)
 app.include_router(strategy_router)
 app.include_router(settings_router)
+app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(ws_router)
 
 

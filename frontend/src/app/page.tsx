@@ -15,10 +15,13 @@ import SignalPanel from "@/components/panels/SignalPanel";
 import DashboardView from "@/components/views/DashboardView";
 import SettingsView from "@/components/views/SettingsView";
 import AssetDetailView from "@/components/views/AssetDetailView";
+import PerformanceView from "@/components/views/PerformanceView";
+import SymbolSearch from "@/components/ui/SymbolSearch";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PipelineStatusBar } from "@/components/layout/PipelineStatusBar";
 import { ToastContainer } from "@/components/ui/ToastContainer";
 import { useTradingStore } from "@/store/useTradingStore";
+import { useAuthStore } from "@/store/useAuthStore";
 import { usePipelineInit } from "@/hooks/usePipelineInit";
 // useWebSocket removed — caused 10/sec re-renders killing all charts
 // Pipeline WebSocket (usePipelineInit) handles live data now
@@ -27,9 +30,94 @@ import { BarChart3, LayoutGrid, Loader2 } from "lucide-react";
 
 type ChartMode = "single" | "three-screen";
 
+// ── Login Form (inline) ──────────────────────────────────
+function LoginForm() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const login = useAuthStore((s) => s.login);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setSubmitting(true);
+    const ok = await login(username, password);
+    setSubmitting(false);
+    if (!ok) setError("Invalid username or password");
+  };
+
+  return (
+    <div className="flex items-center justify-center h-screen bg-background">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-sm p-8 rounded-xl bg-surface border border-border space-y-5"
+      >
+        {/* Brand */}
+        <div className="flex flex-col items-center gap-2 mb-2">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-accent/25 to-accent/5 border border-accent/15 flex items-center justify-center">
+            <span className="text-accent font-bold text-[16px] font-mono leading-none">E</span>
+          </div>
+          <h1 className="text-[15px] font-semibold text-foreground tracking-tight">Elder Trading System</h1>
+          <p className="text-[11px] text-muted">Sign in to continue</p>
+        </div>
+
+        {error && (
+          <div className="px-3 py-2 rounded-md bg-red-500/10 border border-red-500/20 text-[12px] text-red-400">
+            {error}
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <label className="text-[11px] font-medium text-muted">Username</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 rounded-md bg-background border border-border text-[13px] text-foreground placeholder:text-muted/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
+            placeholder="Enter username"
+            autoFocus
+            required
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-[11px] font-medium text-muted">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 rounded-md bg-background border border-border text-[13px] text-foreground placeholder:text-muted/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
+            placeholder="Enter password"
+            required
+          />
+        </div>
+
+        <button
+          type="submit"
+          disabled={submitting || !username || !password}
+          className="w-full py-2 rounded-md bg-accent text-white text-[13px] font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {submitting ? "Signing in..." : "Sign In"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [view, setView] = useState<ViewId>("dashboard");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [chartMode, setChartMode] = useState<ChartMode>("single");
+
+  // Auth state
+  const authLoading = useAuthStore((s) => s.loading);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const checkAuth = useAuthStore((s) => s.checkAuth);
+
+  useEffect(() => {
+    checkAuth();
+  }, [checkAuth]);
 
   // Zustand store — asset, data, pipeline state
   const symbol = useTradingStore((s) => s.symbol);
@@ -48,6 +136,18 @@ export default function Dashboard() {
   // Pipeline WebSocket connection status from store
   const wsConnected = useTradingStore((s) => s.pipelineWsConnected);
 
+  // Auth gate — show loading spinner or login form
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-background">
+        <Loader2 className="w-6 h-6 text-muted animate-spin" />
+      </div>
+    );
+  }
+  if (!isAuthenticated) {
+    return <LoginForm />;
+  }
+
   const handleSymbolChange = (sym: string, exch: string) => {
     setAsset(sym, exch);
     if (wsManager) {
@@ -63,6 +163,13 @@ export default function Dashboard() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      // Cmd+K / Ctrl+K = Symbol search
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+        return;
+      }
+
       // Don't trigger if typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
@@ -72,7 +179,8 @@ export default function Dashboard() {
         case "3": setView("trades"); break;
         case "4": setView("signals"); break;
         case "5": setView("risk"); break;
-        case "6": setView("portfolio"); break;
+        case "6": setView("performance"); break;
+        case "7": setView("portfolio"); break;
         case "Escape":
           if (view === "asset-detail") setView("dashboard");
           break;
@@ -91,8 +199,14 @@ export default function Dashboard() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [view, setIntervalStore]);
 
+  const handleSearchSelect = (sym: string, exch: string) => {
+    handleSymbolChange(sym, exch);
+    setView("asset-detail");
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-background">
+      <SymbolSearch open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={handleSearchSelect} />
       <Sidebar active={view} onChange={setView} />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -282,6 +396,13 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+        )}
+
+        {/* ═══════ Performance ═════════════════════════════════ */}
+        {view === "performance" && (
+          <ErrorBoundary label="Performance">
+            <PerformanceView />
+          </ErrorBoundary>
         )}
 
         {/* ═══════ Asset Detail ═══════════════════════════════ */}

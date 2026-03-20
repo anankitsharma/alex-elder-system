@@ -24,9 +24,17 @@ class PipelineManager:
         """Set the broadcast function for pipeline events."""
         self._broadcast_fn = fn
 
-    async def start_tracking(self, symbol: str, exchange: str = "NSE") -> AssetSession:
-        """Start tracking a symbol through the pipeline."""
-        key = f"{symbol}:{exchange}"
+    async def start_tracking(self, symbol: str, exchange: str = "NSE", user_id: int = None) -> AssetSession:
+        """Start tracking a symbol through the pipeline.
+
+        Args:
+            symbol: Instrument symbol (e.g., "NIFTY")
+            exchange: Exchange (e.g., "NFO", "MCX")
+            user_id: Optional user ID for per-user session isolation.
+                     If None, creates a shared session (legacy single-user mode).
+        """
+        # Key includes user_id for per-user sessions
+        key = f"{symbol}:{exchange}" if not user_id else f"{symbol}:{exchange}:u{user_id}"
 
         if key in self._sessions:
             session = self._sessions[key]
@@ -41,7 +49,7 @@ class PipelineManager:
         if not token:
             raise ValueError(f"Could not resolve token for {symbol} on {exchange}")
 
-        session = AssetSession(symbol, exchange, token)
+        session = AssetSession(symbol, exchange, token, user_id=user_id)
         session._broadcast = self._broadcast_fn
 
         self._sessions[key] = session
@@ -237,23 +245,77 @@ class PipelineManager:
         logger.info("ROLLOVER COMPLETE: {}:{} {} -> {} (new token={})",
                     symbol, exchange, old_contract, new_session.contract_symbol, new_token)
         try:
-            from app.notifications.telegram import _send
-            await _send(
-                f"🔄 <b>CONTRACT ROLLOVER: {symbol}</b>\n\n"
-                f"Old: {old_contract} (token {old_token})\n"
-                f"New: {new_session.contract_symbol} (token {new_token})\n"
-                f"Expiry: {new_session.expiry_date.strftime('%Y-%m-%d') if new_session.expiry_date else '?'}\n"
-                f"Days left: {new_session.days_to_expiry}"
+            from app.notifications.telegram import notify_rollover
+            await notify_rollover(
+                symbol=symbol,
+                old_contract=old_contract,
+                new_contract=new_session.contract_symbol or "?",
+                new_token=str(new_token),
+                expiry=new_session.expiry_date.strftime('%Y-%m-%d') if new_session.expiry_date else "?",
+                days_left=new_session.days_to_expiry or 0,
             )
         except Exception:
             pass
 
     async def shutdown(self):
-        """Shut down all sessions."""
-        for key in list(self._sessions.keys()):
-            self._sessions[key].stop()
+        """Graceful shutdown: clean up DB state, then stop sessions.
+
+        - PAPER: cancel PENDING orders, close OPEN positions at last price
+        - LIVE: cancel PENDING orders only (don't auto-close broker positions)
+        - Send shutdown notification
+        """
+        from app.config import settings
+        from app.database import async_session
+        from app.pipeline import db_persistence as db
+
+        logger.info("PipelineManager shutting down ({} sessions)...", len(self._sessions))
+
+        for key, session in list(self._sessions.items()):
+            try:
+                async with async_session() as dbsession:
+                    # Cancel stale PENDING orders
+                    pending = await db.load_pending_orders(dbsession)
+                    cancelled = 0
+                    for order in pending:
+                        if order.symbol == session.symbol:
+                            order.status = "CANCELLED"
+                            cancelled += 1
+                    if cancelled:
+                        await dbsession.commit()
+                        logger.info("Cancelled {} PENDING orders for {}", cancelled, key)
+
+                    # In PAPER mode, close open positions at last known price
+                    if settings.trading_mode == "PAPER":
+                        positions = await db.load_open_positions_by_symbol(
+                            dbsession, session.symbol
+                        )
+                        for pos in positions:
+                            ltp = None
+                            screen2_tf = session.screen_timeframes.get("2", "1d")
+                            df = session.candle_buffers.get(screen2_tf)
+                            if df is not None and not df.empty:
+                                ltp = float(df.iloc[-1].get("close", 0))
+                            if ltp and ltp > 0:
+                                await db.close_position(dbsession, pos.id, ltp)
+                                logger.info(
+                                    "Shutdown: closed PAPER {} {} @ {}",
+                                    pos.direction, session.symbol, ltp,
+                                )
+            except Exception as e:
+                logger.warning("Shutdown cleanup failed for {}: {}", key, e)
+
+            session.stop()
+
         self._sessions.clear()
         self._token_map.clear()
+
+        # Send shutdown notification
+        try:
+            from app.notifications.telegram import notify_system_shutdown
+            await notify_system_shutdown()
+        except Exception:
+            pass
+
         logger.info("PipelineManager shut down")
 
     async def _resolve_token(self, symbol: str, exchange: str) -> Optional[str]:
