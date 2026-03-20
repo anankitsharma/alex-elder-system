@@ -139,14 +139,25 @@ async def _heartbeat_loop():
                             if completed:
                                 await session._on_new_candle(tf, completed)
                         # Broadcast running bars
+                        current_price = 0
                         for tf, builder in session.candle_builders.items():
                             bar = builder.running_bar
-                            if bar and session._broadcast:
-                                await session._broadcast_event("running_bar", {
-                                    "symbol": session.symbol,
-                                    "timeframe": tf,
-                                    "bar": bar,
-                                })
+                            if bar:
+                                current_price = bar.get("close", 0)
+                                if session._broadcast:
+                                    await session._broadcast_event("running_bar", {
+                                        "symbol": session.symbol,
+                                        "timeframe": tf,
+                                        "bar": bar,
+                                    })
+
+                        # Check stop losses (throttled: every 2s per session)
+                        if current_price > 0:
+                            sl_key = f"_sl_{key}"
+                            last_sl = getattr(_heartbeat_loop, sl_key, 0)
+                            if now - last_sl >= 2:
+                                setattr(_heartbeat_loop, sl_key, now)
+                                await session._check_stop_losses(current_price)
 
         # ── Heartbeat (every HEARTBEAT_INTERVAL) ──
         now = _time.time()

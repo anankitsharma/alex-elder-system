@@ -380,6 +380,39 @@ async def load_open_positions(
     return list(result.scalars().all())
 
 
+async def load_open_positions_by_symbol(
+    session: AsyncSession, symbol: str,
+) -> list[Position]:
+    """Load open positions for a specific symbol."""
+    stmt = select(Position).where(
+        and_(Position.symbol == symbol, Position.status == "OPEN")
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def update_position_stop(
+    session: AsyncSession, position_id: int, new_stop: float, current_price: float,
+) -> None:
+    """Update trailing stop on a position (only tightens, never widens)."""
+    stmt = select(Position).where(Position.id == position_id)
+    result = await session.execute(stmt)
+    pos = result.scalar_one_or_none()
+    if pos and pos.status == "OPEN":
+        # Elder's rule: stop only tightens, never widens
+        if pos.direction == "LONG" and new_stop > (pos.stop_price or 0):
+            pos.stop_price = new_stop
+        elif pos.direction == "SHORT" and new_stop < (pos.stop_price or float("inf")):
+            pos.stop_price = new_stop
+        pos.current_price = current_price
+        # Update unrealized P&L
+        if pos.direction == "LONG":
+            pos.unrealized_pnl = (current_price - pos.entry_price) * pos.quantity
+        else:
+            pos.unrealized_pnl = (pos.entry_price - current_price) * pos.quantity
+        await session.commit()
+
+
 async def load_month_trades(
     session: AsyncSession,
     month: str,

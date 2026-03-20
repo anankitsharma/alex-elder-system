@@ -294,8 +294,118 @@ class AssetSession:
             "data": self.indicators.get(timeframe, {}),
         })
 
+        # Update trailing stops on candle close (Elder's SafeZone method)
+        await self._update_trailing_stops()
+
         # Evaluate signals
         await self._evaluate_signals()
+
+    async def _check_stop_losses(self, current_price: float):
+        """Check if any open position's stop has been breached. Close if so."""
+        if current_price <= 0:
+            return
+        try:
+            async with async_session() as session:
+                positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                for pos in positions:
+                    if not pos.stop_price or pos.stop_price <= 0:
+                        continue
+                    breached = False
+                    if pos.direction == "LONG" and current_price <= pos.stop_price:
+                        breached = True
+                    elif pos.direction == "SHORT" and current_price >= pos.stop_price:
+                        breached = True
+
+                    if breached:
+                        trade = await db.close_position(session, pos.id, current_price)
+                        if trade:
+                            pnl = (current_price - pos.entry_price) * pos.quantity if pos.direction == "LONG" \
+                                else (pos.entry_price - current_price) * pos.quantity
+                            logger.info(
+                                "STOP HIT: {} {} closed @ {:.2f} (stop={:.2f}) P&L={:.2f}",
+                                pos.direction, self.symbol, current_price, pos.stop_price, pnl,
+                            )
+                            await self._broadcast_event("position_closed", {
+                                "symbol": self.symbol,
+                                "direction": pos.direction,
+                                "entry_price": pos.entry_price,
+                                "exit_price": current_price,
+                                "stop_price": pos.stop_price,
+                                "quantity": pos.quantity,
+                                "pnl": round(pnl, 2),
+                                "reason": "STOP_LOSS",
+                            })
+                            # Telegram alert
+                            try:
+                                from app.notifications.telegram import _send
+                                emoji = "🛑" if pnl < 0 else "✅"
+                                await _send(
+                                    f"{emoji} <b>STOP HIT: {self.symbol}</b>\n\n"
+                                    f"Direction: {pos.direction}\n"
+                                    f"Entry: ₹{pos.entry_price:,.2f} → Exit: ₹{current_price:,.2f}\n"
+                                    f"Stop: ₹{pos.stop_price:,.2f}\n"
+                                    f"P&L: <b>₹{pnl:,.2f}</b>\n"
+                                    f"Qty: {pos.quantity}"
+                                )
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.debug("Stop check failed for {}: {}", self.symbol, e)
+
+    async def _update_trailing_stops(self):
+        """Update open position stops using SafeZone (Elder's trailing stop method).
+
+        Rules:
+        - LONG: stop = max(current_stop, new_safezone_long) — only tightens up
+        - SHORT: stop = min(current_stop, new_safezone_short) — only tightens down
+        - Never widens the stop
+        """
+        try:
+            screen2_tf = self.screen_timeframes.get("2", "1d")
+            ind = self.indicators.get(screen2_tf, {})
+            safezone_long = last_non_null(ind.get("safezone_long", []))
+            safezone_short = last_non_null(ind.get("safezone_short", []))
+
+            if not safezone_long and not safezone_short:
+                return
+
+            # Current price
+            ltp = None
+            df = self.candle_buffers.get(screen2_tf, pd.DataFrame())
+            if not df.empty:
+                ltp = float(df.iloc[-1].get("close", 0))
+
+            if not ltp:
+                return
+
+            async with async_session() as session:
+                positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                for pos in positions:
+                    new_stop = None
+                    if pos.direction == "LONG" and safezone_long:
+                        new_stop = safezone_long
+                    elif pos.direction == "SHORT" and safezone_short:
+                        new_stop = safezone_short
+
+                    if new_stop:
+                        old_stop = pos.stop_price or 0
+                        await db.update_position_stop(session, pos.id, new_stop, ltp)
+                        # Check if stop actually tightened
+                        if (pos.direction == "LONG" and new_stop > old_stop) or \
+                           (pos.direction == "SHORT" and new_stop < old_stop):
+                            logger.info(
+                                "Trailing stop updated: {} {} {:.2f} → {:.2f}",
+                                pos.direction, self.symbol, old_stop, new_stop,
+                            )
+                            await self._broadcast_event("trailing_stop_updated", {
+                                "symbol": self.symbol,
+                                "direction": pos.direction,
+                                "old_stop": round(old_stop, 2),
+                                "new_stop": round(new_stop, 2),
+                                "ltp": round(ltp, 2),
+                            })
+        except Exception as e:
+            logger.debug("Trailing stop update failed for {}: {}", self.symbol, e)
 
     async def _evaluate_signals(self):
         """Run Triple Screen analysis on latest indicator data."""
