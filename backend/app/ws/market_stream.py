@@ -170,13 +170,16 @@ async def _heartbeat_loop():
                                     })
 
                         # Check stop losses + targets (throttled: every 2s per session)
+                        # Only during market hours — skip weekends/holidays
                         now = _time.time()
                         if current_price > 0:
-                            sl_key = f"_sl_{key}"
-                            last_sl = getattr(_heartbeat_loop, sl_key, 0)
-                            if now - last_sl >= 2:
-                                setattr(_heartbeat_loop, sl_key, now)
-                                await session._check_stop_losses(current_price)
+                            from app.pipeline.market_hours import is_market_open as _mkt_open
+                            if _mkt_open(session.exchange, session.symbol):
+                                sl_key = f"_sl_{key}"
+                                last_sl = getattr(_heartbeat_loop, sl_key, 0)
+                                if now - last_sl >= 2:
+                                    setattr(_heartbeat_loop, sl_key, now)
+                                    await session._check_stop_losses(current_price)
 
         # ── Heartbeat (every HEARTBEAT_INTERVAL) ──
         now = _time.time()
@@ -260,7 +263,8 @@ async def _heartbeat_loop():
             _heartbeat_loop._last_order_poll = now
             try:
                 from app.config import settings as _cfg
-                if _cfg.trading_mode == "LIVE":
+                from app.pipeline.holidays import is_trading_day as _is_td2
+                if _cfg.trading_mode == "LIVE" and _is_td2():
                     await _poll_order_fills(pipeline_manager)
             except Exception as e:
                 logger.debug("Order fill poll error: {}", e)
@@ -284,9 +288,10 @@ async def _heartbeat_loop():
             _now_ist = _dt.now(_IST)
             _today = _now_ist.strftime("%Y-%m-%d")
             _t = _now_ist.time()
-            # Send at 15:35 IST (5 min after NSE close), weekdays only
+            # Send at 15:35 IST (5 min after NSE close), trading days only
+            from app.pipeline.holidays import is_trading_day as _is_td
             if (_t.hour == 15 and 35 <= _t.minute <= 36
-                    and _now_ist.weekday() < 5
+                    and _is_td(_now_ist.date())
                     and _heartbeat_loop._last_daily_summary != _today):
                 _heartbeat_loop._last_daily_summary = _today
                 await _send_daily_summary(_today)

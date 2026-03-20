@@ -156,14 +156,25 @@ def get_session(exchange: str, symbol: str = "", dt: Optional[datetime] = None) 
 
 
 def is_market_open(exchange: str, symbol: str = "", dt: Optional[datetime] = None) -> bool:
-    """Check if the market is currently open for the given exchange/symbol."""
+    """Check if the market is currently open for the given exchange/symbol.
+
+    Checks: (1) not weekend, (2) not holiday, (3) within session hours.
+    """
     if dt is None:
         dt = datetime.now(IST)
-    session = get_session(exchange, symbol, dt)
-    # Also check for weekends
-    weekday = dt.astimezone(IST).weekday()
-    if weekday >= 5:  # Saturday=5, Sunday=6
+
+    ist_dt = dt.astimezone(IST) if dt.tzinfo else IST.localize(dt)
+
+    # Weekends
+    if ist_dt.weekday() >= 5:
         return False
+
+    # Holidays
+    from app.pipeline.holidays import is_holiday
+    if is_holiday(ist_dt.date(), exchange):
+        return False
+
+    session = get_session(exchange, symbol, dt)
     return session.is_open(dt)
 
 

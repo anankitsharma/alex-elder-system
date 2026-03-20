@@ -96,8 +96,23 @@ class MarketFeed:
             self._reconnect_thread.start()
 
     def _delayed_reconnect(self, delay: float):
-        """Reconnect after a delay (runs in background thread)."""
+        """Reconnect after a delay (runs in background thread).
+
+        Outside market hours (weekends, holidays, off-hours), waits longer
+        to avoid wasting resources and broker API rate limits.
+        """
         time.sleep(delay)
+
+        # Check if any market is open — if not, sleep until next likely open
+        try:
+            from app.pipeline.holidays import is_trading_day
+            from datetime import date as _date
+            if not is_trading_day(_date.today()):
+                logger.info("Non-trading day — delaying feed reconnect by 60min")
+                time.sleep(3600)  # 1 hour
+                return  # Will retry on next _on_close cycle
+        except Exception:
+            pass  # If check fails, proceed with reconnect
         if self._should_reconnect and not self._running:
             try:
                 self.connect()

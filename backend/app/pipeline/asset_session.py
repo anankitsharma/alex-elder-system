@@ -792,12 +792,18 @@ class AssetSession:
     async def _update_trailing_stops(self):
         """Update open position stops using SafeZone (Elder's trailing stop method).
 
+        Skips outside market hours to avoid setting stops on stale data.
+
         Rules:
         - LONG: stop = max(current_stop, new_safezone_long) — only tightens up
         - SHORT: stop = min(current_stop, new_safezone_short) — only tightens down
         - Never widens the stop
         """
         try:
+            from app.pipeline.market_hours import is_market_open
+            if not is_market_open(self.exchange, self.symbol):
+                return
+
             screen2_tf = self.screen_timeframes.get("2", "1d")
             ind = self.indicators.get(screen2_tf, {})
             safezone_long = last_non_null(ind.get("safezone_long", []))
@@ -847,7 +853,14 @@ class AssetSession:
             logger.debug("Trailing stop update failed for {}: {}", self.symbol, e)
 
     async def _evaluate_signals(self):
-        """Run Triple Screen analysis on latest indicator data (under lock)."""
+        """Run Triple Screen analysis on latest indicator data (under lock).
+
+        Skips evaluation outside market hours (weekends, holidays, off-hours)
+        to prevent signals firing on stale data.
+        """
+        from app.pipeline.market_hours import is_market_open
+        if not is_market_open(self.exchange, self.symbol):
+            return
         async with self._signal_lock:
             await self._evaluate_signals_inner()
 
