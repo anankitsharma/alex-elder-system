@@ -375,6 +375,8 @@ export default function TradingViewChart({
     const s = seriesRef.current;
     if (!s.candles || candles.length === 0) return;
 
+    try {
+
     const hasImpulse = indicators?.impulse_color?.some((v) => v != null);
 
     // Main: Candles
@@ -510,6 +512,8 @@ export default function TradingViewChart({
         val <= 0 ? "#ef5350" : "#ef535060"
       ));
     }
+
+    } catch { /* setData/update conflict — safe to skip */ }
   }, [candles, indicators]);
 
   /* ── running bar — incremental update via series.update() ───── */
@@ -523,27 +527,26 @@ export default function TradingViewChart({
     const time = toTime(runningBar.timestamp);
 
     // Update candle — same timestamp = in-place update, new timestamp = append
-    s.candles.update({
-      time,
-      open: runningBar.open,
-      high: runningBar.high,
-      low: runningBar.low,
-      close: runningBar.close,
-      // Slightly different border to indicate running bar
-      borderColor: runningBar.close >= runningBar.open ? "#22c55ecc" : "#ef4444cc",
-    } as CandlestickData);
-
-    // Update volume running bar
-    if (s.volume) {
-      s.volume.update({
+    try {
+      s.candles.update({
         time,
-        value: runningBar.volume,
-        color: runningBar.close >= runningBar.open ? "#22c55e30" : "#ef444430",
-      } as HistogramData);
-    }
+        open: runningBar.open,
+        high: runningBar.high,
+        low: runningBar.low,
+        close: runningBar.close,
+        borderColor: runningBar.close >= runningBar.open ? "#22c55ecc" : "#ef4444cc",
+      } as CandlestickData);
 
-    // Update LTP price line
-    updatePriceLine(s.candles, runningBar.close);
+      if (s.volume) {
+        s.volume.update({
+          time,
+          value: runningBar.volume,
+          color: runningBar.close >= runningBar.open ? "#22c55e30" : "#ef444430",
+        } as HistogramData);
+      }
+
+      updatePriceLine(s.candles, runningBar.close);
+    } catch { /* running bar update conflict — next tick will retry */ }
   }, [runningBar]);
 
   /** Create/update a horizontal dashed line showing last traded price */
