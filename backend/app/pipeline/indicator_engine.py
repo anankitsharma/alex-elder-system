@@ -296,6 +296,59 @@ class IndicatorEngine:
         else:
             result["macd_divergence_signal"] = [None] * n
 
+        # ── ADX (Average Directional Index) — regime detection ──
+        # ADX < 20 = sideways/no trend, ADX > 25 = trending
+        try:
+            high = df["high"].values.astype(float)
+            low = df["low"].values.astype(float)
+            close = df["close"].values.astype(float)
+            adx_period = 14
+
+            if n > adx_period + 1:
+                # True Range
+                tr = np.maximum(
+                    high[1:] - low[1:],
+                    np.maximum(
+                        np.abs(high[1:] - close[:-1]),
+                        np.abs(low[1:] - close[:-1]),
+                    ),
+                )
+                # +DM / -DM
+                plus_dm = np.where(
+                    (high[1:] - high[:-1]) > (low[:-1] - low[1:]),
+                    np.maximum(high[1:] - high[:-1], 0),
+                    0.0,
+                )
+                minus_dm = np.where(
+                    (low[:-1] - low[1:]) > (high[1:] - high[:-1]),
+                    np.maximum(low[:-1] - low[1:], 0),
+                    0.0,
+                )
+
+                # Wilder smoothing (EMA with alpha=1/period)
+                def _wilder_smooth(arr, period):
+                    out = np.full(len(arr), np.nan)
+                    out[period - 1] = np.mean(arr[:period])
+                    for i in range(period, len(arr)):
+                        out[i] = out[i - 1] - (out[i - 1] / period) + arr[i]
+                    return out
+
+                atr = _wilder_smooth(tr, adx_period)
+                plus_di = 100 * _wilder_smooth(plus_dm, adx_period) / np.where(atr > 0, atr, 1)
+                minus_di = 100 * _wilder_smooth(minus_dm, adx_period) / np.where(atr > 0, atr, 1)
+                dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, plus_di + minus_di, 1)
+                adx_vals = _wilder_smooth(dx, adx_period)
+
+                # Pad to full length (first element is lost from diff)
+                adx_full = np.full(n, np.nan)
+                adx_full[1:] = adx_vals
+                result["adx"] = _to_list(adx_full, n, decimals=1)
+            else:
+                result["adx"] = [None] * n
+        except Exception as e:
+            logger.debug("ADX computation failed: {}", e)
+            result["adx"] = [None] * n
+
         # Cache result
         self._cache_key = cache_key
         self._cache_result = result

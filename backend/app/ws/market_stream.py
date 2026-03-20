@@ -295,6 +295,20 @@ async def _heartbeat_loop():
                     and _heartbeat_loop._last_daily_summary != _today):
                 _heartbeat_loop._last_daily_summary = _today
                 await _send_daily_summary(_today)
+
+            # ── Daily broker session logout (SEBI compliance, after market close) ──
+            if not hasattr(_heartbeat_loop, '_last_session_logout'):
+                _heartbeat_loop._last_session_logout = ""
+            if (_t.hour == 15 and 40 <= _t.minute <= 41
+                    and _is_td(_now_ist.date())
+                    and _heartbeat_loop._last_session_logout != _today):
+                _heartbeat_loop._last_session_logout = _today
+                try:
+                    from app.broker.angel_client import angel
+                    angel.logout()
+                    logger.info("Daily session logout completed (SEBI compliance)")
+                except Exception as e:
+                    logger.warning("Daily session logout failed: {}", e)
         except Exception:
             pass
 

@@ -46,11 +46,20 @@ class Settings(BaseSettings):
     paper_starting_capital: float = 100000.0  # Default equity for PAPER mode
     paper_slippage_pct: float = 0.1  # Simulated slippage for paper trading (%)
 
+    # Regime detection
+    adx_filter_enabled: bool = True      # Enable ADX-based regime filter
+    adx_weak_trend: float = 20.0         # ADX below this → sideways (skip signals)
+    adx_moderate_trend: float = 25.0     # ADX below this → weak trend (reduce confidence 25%)
+
     # Anti-spam alert thresholds
     tide_dead_zone: float = 0.005       # MACD-H slope below this → NEUTRAL
     wave_fi2_dead_zone: float = 0.01    # Force Index(2) abs below this → 0
     flip_confirm_bars: int = 2           # Consecutive bars to confirm tide flip
     wave_confirm_bars: int = 2           # Consecutive bars to confirm wave change
+
+    # Revenge trading prevention
+    max_consecutive_losses: int = 3   # Lock out after N consecutive losing trades
+    loss_cooldown_minutes: int = 30   # Cooldown period after lockout
 
     # Rate limiting
     max_orders_per_minute: int = 10

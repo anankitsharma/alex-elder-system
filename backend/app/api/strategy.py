@@ -550,6 +550,57 @@ async def get_performance():
         else:
             unrealized_pnl += (pos.entry_price - (pos.current_price or pos.entry_price)) * pos.quantity
 
+    # ── Institutional-grade metrics ──
+    import math
+
+    # Daily returns from equity curve for Sharpe/Sortino
+    daily_returns = []
+    for i in range(1, len(equity_curve)):
+        prev = equity_curve[i - 1]["equity"]
+        curr = equity_curve[i]["equity"]
+        if prev > 0:
+            daily_returns.append((curr - prev) / prev)
+
+    sharpe_ratio = None
+    sortino_ratio = None
+    calmar_ratio = None
+
+    if len(daily_returns) >= 5:
+        mean_r = sum(daily_returns) / len(daily_returns)
+        variance = sum((r - mean_r) ** 2 for r in daily_returns) / len(daily_returns)
+        std_r = math.sqrt(variance) if variance > 0 else 0.001
+
+        # Sharpe (annualized, assuming ~252 trading days)
+        sharpe_ratio = round(mean_r / std_r * math.sqrt(252), 2)
+
+        # Sortino (downside deviation only)
+        neg_returns = [r for r in daily_returns if r < 0]
+        if neg_returns:
+            downside_var = sum(r ** 2 for r in neg_returns) / len(daily_returns)
+            downside_std = math.sqrt(downside_var) if downside_var > 0 else 0.001
+            sortino_ratio = round(mean_r / downside_std * math.sqrt(252), 2)
+
+        # Calmar (CAGR / max drawdown)
+        if max_drawdown > 0 and total_pnl != 0:
+            cagr = ((equity / starting_equity) ** (252 / max(len(daily_returns), 1)) - 1) * 100
+            calmar_ratio = round(cagr / max_drawdown, 2)
+
+    # SQN from R-multiples
+    sqn = None
+    sqn_rating = "insufficient_data"
+    if len(r_multiples) >= 30:
+        mean_rm = sum(r_multiples) / len(r_multiples)
+        var_rm = sum((r - mean_rm) ** 2 for r in r_multiples) / len(r_multiples)
+        std_rm = math.sqrt(var_rm) if var_rm > 0 else 0.001
+        sqn = round(math.sqrt(len(r_multiples)) * mean_rm / std_rm, 2)
+        if sqn >= 7.0: sqn_rating = "holy_grail"
+        elif sqn >= 5.1: sqn_rating = "superb"
+        elif sqn >= 3.0: sqn_rating = "excellent"
+        elif sqn >= 2.5: sqn_rating = "good"
+        elif sqn >= 2.0: sqn_rating = "average"
+        elif sqn >= 1.6: sqn_rating = "below_average"
+        else: sqn_rating = "poor"
+
     return {
         "starting_equity": starting_equity,
         "current_equity": round(equity, 2),
@@ -564,6 +615,12 @@ async def get_performance():
         "profit_factor": round(profit_factor, 2),
         "expectancy": round(expectancy, 2),
         "max_drawdown_pct": round(max_drawdown, 2),
+        # Institutional metrics
+        "sharpe_ratio": sharpe_ratio,
+        "sortino_ratio": sortino_ratio,
+        "calmar_ratio": calmar_ratio,
+        "sqn": sqn,
+        "sqn_rating": sqn_rating,
         "r_multiples": r_multiples,
         "equity_curve": equity_curve,
         "open_positions": len(open_positions),

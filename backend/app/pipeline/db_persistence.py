@@ -4,6 +4,7 @@ Async CRUD operations using existing SQLAlchemy models.
 """
 
 import json
+import math
 from datetime import datetime
 from typing import Optional
 
@@ -360,6 +361,10 @@ async def close_position(
 
         pnl_pct = (pnl / (pos.entry_price * pos.quantity)) * 100.0 if pos.entry_price > 0 else 0.0
 
+        # R-multiple: P&L expressed as multiple of initial risk (1R)
+        initial_risk = abs(pos.entry_price - pos.stop_price) * pos.quantity if pos.stop_price else 0
+        r_mult = pnl / initial_risk if initial_risk > 0 else 0.0
+
         trade = Trade(
             user_id=pos.user_id,
             position_id=pos.id,
@@ -371,6 +376,9 @@ async def close_position(
             quantity=pos.quantity,
             pnl=round(pnl, 2),
             pnl_percent=round(pnl_pct, 2),
+            mae=pos.mae,
+            mfe=pos.mfe,
+            r_multiple=round(r_mult, 2),
             mode=pos.mode,
             entry_time=pos.opened_at,
             exit_time=pos.closed_at,
@@ -452,6 +460,69 @@ async def load_month_trades(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+# ── SQN (System Quality Number) ──────────────────────────────
+
+async def compute_sqn(session: AsyncSession, user_id: int = None, min_trades: int = 30) -> dict:
+    """Compute Van Tharp's System Quality Number from recent trades.
+
+    SQN = sqrt(N) * mean(R-multiples) / stddev(R-multiples)
+    Rating: <1.6=poor, 2.0-2.4=average, 2.5-2.9=good, 3.0-5.0=excellent, 5.1+=superb
+    """
+    stmt = select(Trade).where(Trade.r_multiple != None).order_by(Trade.created_at.desc()).limit(100)
+    if user_id is not None:
+        stmt = stmt.where(Trade.user_id == user_id)
+    result = await session.execute(stmt)
+    trades = result.scalars().all()
+
+    r_values = [t.r_multiple for t in trades if t.r_multiple is not None]
+    n = len(r_values)
+
+    if n < min_trades:
+        return {"sqn": None, "trades": n, "min_required": min_trades, "rating": "insufficient_data"}
+
+    mean_r = sum(r_values) / n
+    variance = sum((r - mean_r) ** 2 for r in r_values) / n
+    std_r = math.sqrt(variance) if variance > 0 else 0.001
+
+    sqn = math.sqrt(n) * mean_r / std_r
+
+    # Expectancy per R
+    wins = [r for r in r_values if r > 0]
+    losses = [r for r in r_values if r <= 0]
+    win_rate = len(wins) / n if n > 0 else 0
+    avg_win_r = sum(wins) / len(wins) if wins else 0
+    avg_loss_r = sum(losses) / len(losses) if losses else 0
+    expectancy = (win_rate * avg_win_r) + ((1 - win_rate) * avg_loss_r)
+
+    # Rating
+    if sqn >= 7.0:
+        rating = "holy_grail"
+    elif sqn >= 5.1:
+        rating = "superb"
+    elif sqn >= 3.0:
+        rating = "excellent"
+    elif sqn >= 2.5:
+        rating = "good"
+    elif sqn >= 2.0:
+        rating = "average"
+    elif sqn >= 1.6:
+        rating = "below_average"
+    else:
+        rating = "poor"
+
+    return {
+        "sqn": round(sqn, 2),
+        "rating": rating,
+        "trades": n,
+        "mean_r": round(mean_r, 3),
+        "std_r": round(std_r, 3),
+        "expectancy_r": round(expectancy, 3),
+        "win_rate": round(win_rate * 100, 1),
+        "avg_win_r": round(avg_win_r, 2),
+        "avg_loss_r": round(avg_loss_r, 2),
+    }
 
 
 # ── Asset Detail Queries ─────────────────────────────────────
@@ -747,6 +818,98 @@ async def get_month_start_equity(
         session, default_equity=settings.paper_starting_capital, user_id=user_id,
     )
     return record.month_start_equity
+
+
+async def get_equity_curve_scale(
+    session: AsyncSession,
+    user_id: Optional[int] = None,
+    lookback: int = 20,
+) -> float:
+    """Equity curve position scaling: full size above MA, half below.
+
+    Computes a 20-trade moving average on cumulative P&L.
+    If current equity is below the MA → return 0.5 (half position size).
+    If above → return 1.0 (full size).
+    """
+    stmt = (
+        select(Trade)
+        .order_by(Trade.created_at.desc())
+        .limit(lookback)
+    )
+    if user_id is not None:
+        stmt = stmt.where(Trade.user_id == user_id)
+    result = await session.execute(stmt)
+    trades = result.scalars().all()
+
+    if len(trades) < lookback:
+        return 1.0  # Not enough data — full size
+
+    pnls = [t.pnl or 0 for t in reversed(trades)]  # Oldest first
+    cumulative = []
+    total = 0
+    for p in pnls:
+        total += p
+        cumulative.append(total)
+
+    ma = sum(cumulative) / len(cumulative)
+    current = cumulative[-1]
+
+    if current < ma:
+        return 0.5  # Below equity curve MA — reduce size
+    return 1.0
+
+
+async def check_correlated_positions(
+    session: AsyncSession,
+    symbol: str,
+    exchange: str,
+    user_id: Optional[int] = None,
+) -> float:
+    """Check if existing open positions are correlated with new symbol.
+
+    Returns a scaling factor (0.5 to 1.0):
+    - No correlated positions → 1.0 (full size)
+    - Correlated position exists (r > 0.7) → 0.5 (half size)
+
+    Known high-correlation pairs for Indian markets:
+    NIFTY-BANKNIFTY, GOLDM-SILVERM, CRUDEOILM-NATGASMINI
+    """
+    # Predefined correlation groups (instruments that move together)
+    CORRELATION_GROUPS = {
+        "INDEX": {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"},
+        "METALS": {"GOLDM", "GOLD", "SILVERM", "SILVER"},
+        "ENERGY": {"CRUDEOILM", "CRUDEOIL", "NATGASMINI", "NATURALGAS"},
+        "BASE_METALS": {"COPPER", "ALUMINIUM", "ZINC", "LEAD", "NICKEL"},
+    }
+
+    # Find which group this symbol belongs to
+    my_group = None
+    for group_name, members in CORRELATION_GROUPS.items():
+        if symbol in members:
+            my_group = members
+            break
+
+    if not my_group:
+        return 1.0  # Symbol not in any correlated group
+
+    # Check if any open position is in the same group
+    positions = await load_open_positions_by_symbol(session, symbol="", user_id=user_id)
+    # Need to check ALL open positions, not just for this symbol
+    stmt = select(Position).where(Position.status == "OPEN")
+    if user_id is not None:
+        stmt = stmt.where(Position.user_id == user_id)
+    result = await session.execute(stmt)
+    open_positions = result.scalars().all()
+
+    for pos in open_positions:
+        if pos.symbol in my_group and pos.symbol != symbol:
+            logger.info(
+                "Correlated position detected: {} and {} in same group — reducing size 50%",
+                symbol, pos.symbol,
+            )
+            return 0.5  # Reduce by 50% for correlated positions
+
+    return 1.0
 
 
 async def load_continuous_candles(

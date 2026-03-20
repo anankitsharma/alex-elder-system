@@ -46,6 +46,8 @@ class Position(Base):
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     risk_amount: Mapped[float] = mapped_column(Float, default=0.0)
     risk_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    mae: Mapped[float] = mapped_column(Float, default=0.0)  # Max Adverse Excursion (worst unrealized loss)
+    mfe: Mapped[float] = mapped_column(Float, default=0.0)  # Max Favorable Excursion (best unrealized profit)
     mode: Mapped[str] = mapped_column(String(10))  # PAPER, LIVE
     status: Mapped[str] = mapped_column(String(10), default="OPEN")
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -66,6 +68,9 @@ class Trade(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     pnl: Mapped[float] = mapped_column(Float)
     pnl_percent: Mapped[float] = mapped_column(Float, nullable=True)
+    mae: Mapped[float] = mapped_column(Float, default=0.0)  # Max Adverse Excursion (worst unrealized loss)
+    mfe: Mapped[float] = mapped_column(Float, default=0.0)  # Max Favorable Excursion (best unrealized profit)
+    r_multiple: Mapped[float] = mapped_column(Float, nullable=True)  # P&L as multiple of initial risk
     channel_width: Mapped[float] = mapped_column(Float, nullable=True)
     grade: Mapped[str] = mapped_column(String(5), nullable=True)  # A, B, C, D
     grade_percent: Mapped[float] = mapped_column(Float, nullable=True)

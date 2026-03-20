@@ -734,6 +734,20 @@ class AssetSession:
                     # Skip if exit already initiated for this position
                     if pos.id in self._exit_initiated:
                         continue
+
+                    # Track MAE/MFE (Maximum Adverse/Favorable Excursion)
+                    if pos.direction == "LONG":
+                        excursion = current_price - pos.entry_price
+                    else:
+                        excursion = pos.entry_price - current_price
+
+                    # Update MAE (most negative excursion = worst drawdown during trade)
+                    if excursion < (pos.mae or 0):
+                        pos.mae = round(excursion, 2)
+                    # Update MFE (most positive excursion = best profit during trade)
+                    if excursion > (pos.mfe or 0):
+                        pos.mfe = round(excursion, 2)
+
                     exit_reason = None
                     # Check stop loss
                     if pos.stop_price and pos.stop_price > 0:
@@ -825,6 +839,7 @@ class AssetSession:
                                 )
                             except Exception:
                                 pass
+                await session.commit()  # Persist MAE/MFE updates
         except Exception as e:
             logger.debug("Stop/target check failed for {}: {}", self.symbol, e)
 
@@ -998,6 +1013,20 @@ class AssetSession:
             # Filter wave through confirmation (requires N consecutive same readings)
             wave = self._alert_mgr.check_wave_confirmed(raw_wave)
 
+            # ── ADX regime filter: reduce confidence in sideways markets ──
+            adx_value = None
+            if settings.adx_filter_enabled:
+                screen1_tf = self.screen_timeframes.get("1", "1w")
+                adx_list = self.indicators.get(screen1_tf, {}).get("adx", [])
+                adx_value = last_non_null(adx_list)
+                if adx_value is not None:
+                    if adx_value < settings.adx_weak_trend:
+                        # Sideways market — suppress signal
+                        confidence = 0
+                    elif adx_value < settings.adx_moderate_trend:
+                        # Weak trend — reduce confidence by 25%
+                        confidence = int(confidence * 0.75)
+
             # Screen 1 aligned = tide is clear (not neutral)
             s1_aligned = tide in ("BULLISH", "BEARISH")
             # Screen 2 aligned = confirmed wave signal matches tide direction
@@ -1112,6 +1141,37 @@ class AssetSession:
         except Exception:
             pass  # If position check fails, proceed anyway
 
+        # Revenge trading prevention: block after N consecutive losses
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select
+                from app.models.trade import Trade
+                stmt = (
+                    select(Trade)
+                    .where(Trade.symbol == self.symbol)
+                    .order_by(Trade.created_at.desc())
+                    .limit(settings.max_consecutive_losses)
+                )
+                if self.user_id:
+                    stmt = stmt.where(Trade.user_id == self.user_id)
+                result = await session.execute(stmt)
+                recent_trades = result.scalars().all()
+
+                if len(recent_trades) >= settings.max_consecutive_losses:
+                    all_losses = all(t.pnl < 0 for t in recent_trades)
+                    if all_losses and recent_trades:
+                        import time as _t
+                        last_loss_time = recent_trades[0].created_at.timestamp() if recent_trades[0].created_at else 0
+                        cooldown_remaining = (settings.loss_cooldown_minutes * 60) - (_t.time() - last_loss_time)
+                        if cooldown_remaining > 0:
+                            logger.info(
+                                "Revenge prevention: {} consecutive losses for {} — locked out for {:.0f}min",
+                                len(recent_trades), self.symbol, cooldown_remaining / 60,
+                            )
+                            return
+        except Exception:
+            pass
+
         # Dedup: direction + time-based (ignores small price changes)
         # AlertStateManager enforces 30-min cooldown per direction
         direction = "LONG" if action == "BUY" else "SHORT"
@@ -1195,6 +1255,40 @@ class AssetSession:
                             "Drawdown scaling {}: {} → {} shares (scale={:.0%})",
                             self.symbol, original, sizing["shares"], scale,
                         )
+
+                # Apply equity curve scaling — reduce size during losing streaks
+                try:
+                    async with async_session() as eq_session:
+                        eq_scale = await db.get_equity_curve_scale(
+                            eq_session, user_id=self.user_id,
+                        )
+                    if eq_scale < 1.0 and sizing.get("shares", 0) > 0:
+                        original = sizing["shares"]
+                        sizing["shares"] = max(1, int(sizing["shares"] * eq_scale))
+                        if sizing["shares"] != original:
+                            logger.info(
+                                "Equity curve scaling {}: {} → {} shares (scale={:.0%})",
+                                self.symbol, original, sizing["shares"], eq_scale,
+                            )
+                except Exception:
+                    pass  # If equity curve check fails, proceed with current size
+
+                # Apply correlation adjustment — reduce if correlated positions exist
+                try:
+                    async with async_session() as corr_session:
+                        corr_scale = await db.check_correlated_positions(
+                            corr_session, self.symbol, self.exchange, user_id=self.user_id,
+                        )
+                    if corr_scale < 1.0 and sizing.get("shares", 0) > 0:
+                        original = sizing["shares"]
+                        sizing["shares"] = max(1, int(sizing["shares"] * corr_scale))
+                        if sizing["shares"] != original:
+                            logger.info(
+                                "Correlation scaling {}: {} → {} shares (scale={:.0%})",
+                                self.symbol, original, sizing["shares"], corr_scale,
+                            )
+                except Exception:
+                    pass
 
                 # Check if this trade would breach 6% rule
                 trade_risk = sizing.get("risk_amount", 0)
@@ -1678,6 +1772,9 @@ class AssetSession:
             "expiry_date": self.expiry_date.strftime("%Y-%m-%d") if self.expiry_date else None,
             "days_to_expiry": (self.expiry_date - datetime.now()).days if self.expiry_date else None,
             "trading_mode": self.effective_trading_mode,
+            "adx": last_non_null(self.indicators.get(
+                self.screen_timeframes.get("1", "1w"), {}
+            ).get("adx", [])),
         }
 
     def stop(self):
