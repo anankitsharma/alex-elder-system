@@ -435,7 +435,7 @@ async def load_positions_by_symbol(
     stmt = (
         select(Position)
         .where(Position.symbol == symbol)
-        .order_by(Position.created_at.desc())
+        .order_by(Position.opened_at.desc())
         .limit(limit)
     )
     result = await session.execute(stmt)
@@ -451,6 +451,6 @@ async def load_positions_by_symbol(
         "risk_amount": r.risk_amount,
         "status": r.status,
         "mode": r.mode,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "closed_at": r.closed_at.isoformat() if hasattr(r, 'closed_at') and r.closed_at else None,
+        "created_at": r.opened_at.isoformat() if r.opened_at else None,
+        "closed_at": r.closed_at.isoformat() if r.closed_at else None,
     } for r in result.scalars().all()]
