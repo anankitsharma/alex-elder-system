@@ -39,3 +39,21 @@ class Candle(Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(Integer)
+    contract_token: Mapped[str] = mapped_column(String(20), nullable=True)  # Which contract sourced this candle
+
+
+class RolloverHistory(Base):
+    """Audit trail of contract rollovers."""
+    __tablename__ = "rollover_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(50), index=True)
+    exchange: Mapped[str] = mapped_column(String(10))
+    old_token: Mapped[str] = mapped_column(String(20))
+    old_contract: Mapped[str] = mapped_column(String(50))
+    new_token: Mapped[str] = mapped_column(String(20))
+    new_contract: Mapped[str] = mapped_column(String(50))
+    old_expiry: Mapped[str] = mapped_column(String(20), nullable=True)
+    new_expiry: Mapped[str] = mapped_column(String(20), nullable=True)
+    positions_closed: Mapped[int] = mapped_column(Integer, default=0)
+    rolled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

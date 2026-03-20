@@ -209,7 +209,7 @@ class AssetSession:
             try:
                 async with async_session() as session:
                     candle_dicts = df.to_dict("records")
-                    await db.save_candles(session, self.instrument_id, timeframe, candle_dicts)
+                    await db.save_candles(session, self.instrument_id, timeframe, candle_dicts, self.token)
             except Exception as e:
                 logger.warning("DB candle save failed: {}", e)
 
@@ -283,7 +283,7 @@ class AssetSession:
         # Persist to DB
         try:
             async with async_session() as session:
-                await db.save_candles(session, self.instrument_id, timeframe, [candle])
+                await db.save_candles(session, self.instrument_id, timeframe, [candle], self.token)
         except Exception as e:
             logger.warning("DB candle save failed: {}", e)
 

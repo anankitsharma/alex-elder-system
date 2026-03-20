@@ -13,7 +13,7 @@ from sqlalchemy import select, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.models.market import Instrument, Candle
+from app.models.market import Instrument, Candle, RolloverHistory
 from app.models.trade import Order, Position, Trade
 from app.models.signal import Signal
 
@@ -58,6 +58,7 @@ async def save_candles(
     instrument_id: int,
     timeframe: str,
     candles: list[dict],
+    contract_token: str = "",
 ) -> int:
     """Save candles to DB (bulk insert, skip existing)."""
     if not candles:
@@ -96,6 +97,7 @@ async def save_candles(
             low=float(c["low"]),
             close=float(c["close"]),
             volume=int(c.get("volume", 0)),
+            contract_token=contract_token or None,
         ))
 
     if new_candles:
@@ -487,3 +489,121 @@ async def load_positions_by_symbol(
         "created_at": r.opened_at.isoformat() if r.opened_at else None,
         "closed_at": r.closed_at.isoformat() if r.closed_at else None,
     } for r in result.scalars().all()]
+
+
+# ── Rollover History ─────────────────────────────────────────
+
+async def save_rollover(
+    session: AsyncSession,
+    symbol: str,
+    exchange: str,
+    old_token: str,
+    old_contract: str,
+    new_token: str,
+    new_contract: str,
+    old_expiry: str = "",
+    new_expiry: str = "",
+    positions_closed: int = 0,
+) -> RolloverHistory:
+    """Record a contract rollover event."""
+    entry = RolloverHistory(
+        symbol=symbol,
+        exchange=exchange,
+        old_token=old_token,
+        old_contract=old_contract,
+        new_token=new_token,
+        new_contract=new_contract,
+        old_expiry=old_expiry,
+        new_expiry=new_expiry,
+        positions_closed=positions_closed,
+    )
+    session.add(entry)
+    await session.commit()
+    await session.refresh(entry)
+    logger.info("Rollover recorded: {} {} -> {} ({})",
+                symbol, old_contract, new_contract, entry.rolled_at)
+    return entry
+
+
+async def load_rollover_history(
+    session: AsyncSession, symbol: str = "", limit: int = 50,
+) -> list[dict]:
+    """Load rollover history, newest first."""
+    stmt = select(RolloverHistory).order_by(RolloverHistory.rolled_at.desc()).limit(limit)
+    if symbol:
+        stmt = stmt.where(RolloverHistory.symbol == symbol)
+    result = await session.execute(stmt)
+    return [{
+        "id": r.id,
+        "symbol": r.symbol,
+        "exchange": r.exchange,
+        "old_token": r.old_token,
+        "old_contract": r.old_contract,
+        "new_token": r.new_token,
+        "new_contract": r.new_contract,
+        "old_expiry": r.old_expiry,
+        "new_expiry": r.new_expiry,
+        "positions_closed": r.positions_closed,
+        "rolled_at": r.rolled_at.isoformat() if r.rolled_at else None,
+    } for r in result.scalars().all()]
+
+
+async def load_continuous_candles(
+    session: AsyncSession,
+    symbol: str,
+    exchange: str,
+    timeframe: str,
+    days: int = 365,
+) -> pd.DataFrame:
+    """Load continuous candle data across contract boundaries.
+
+    Stitches candles from multiple contracts for the same symbol by
+    querying all instrument_ids that match the symbol+exchange, then
+    merging by timestamp (latest contract's data wins on overlap).
+    """
+    # Find all instrument IDs for this symbol
+    inst_stmt = select(Instrument.id).where(
+        and_(Instrument.symbol == symbol, Instrument.exchange == exchange)
+    )
+    inst_result = await session.execute(inst_stmt)
+    inst_ids = [r[0] for r in inst_result.all()]
+
+    if not inst_ids:
+        return pd.DataFrame()
+
+    since = datetime.now() - __import__("datetime").timedelta(days=days)
+
+    # Load candles from all contracts
+    stmt = (
+        select(Candle)
+        .where(
+            and_(
+                Candle.instrument_id.in_(inst_ids),
+                Candle.timeframe == timeframe,
+                Candle.timestamp >= since,
+            )
+        )
+        .order_by(Candle.timestamp)
+    )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    if not rows:
+        return pd.DataFrame()
+
+    data = [{
+        "timestamp": r.timestamp,
+        "open": r.open,
+        "high": r.high,
+        "low": r.low,
+        "close": r.close,
+        "volume": r.volume,
+    } for r in rows]
+
+    df = pd.DataFrame(data)
+
+    # Remove duplicates (same timestamp from different contracts — keep last)
+    df = df.drop_duplicates(subset=["timestamp"], keep="last")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df

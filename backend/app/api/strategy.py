@@ -413,7 +413,20 @@ async def get_asset_detail(
         "signals": signals,
         "orders": orders,
         "positions": positions,
+        "contract": session_obj.contract_symbol if session_obj else None,
+        "expiry_date": session_obj.expiry_date.strftime("%Y-%m-%d") if session_obj and session_obj.expiry_date else None,
+        "days_to_expiry": (session_obj.expiry_date - __import__("datetime").datetime.now()).days if session_obj and session_obj.expiry_date else None,
+        "rollover_history": [],  # Populated below
     }
+
+    # Load rollover history
+    try:
+        async with async_session() as dbsession:
+            result["rollover_history"] = await db.load_rollover_history(dbsession, symbol, limit=10)
+    except Exception:
+        pass
+
+    return result
 
 
 @router.get("/pipeline/contracts")

@@ -218,7 +218,22 @@ class PipelineManager:
         except Exception:
             pass
 
-        # 6. Notify
+        # 6. Save rollover history to DB
+        try:
+            from app.database import async_session
+            from app.pipeline import db_persistence as db
+            async with async_session() as dbsession:
+                await db.save_rollover(
+                    dbsession, symbol, exchange,
+                    old_token, old_contract or "",
+                    new_token, new_session.contract_symbol or "",
+                    old_session.expiry_date.strftime("%Y-%m-%d") if old_session.expiry_date else "",
+                    new_session.expiry_date.strftime("%Y-%m-%d") if new_session.expiry_date else "",
+                )
+        except Exception as e:
+            logger.warning("Rollover history save failed: {}", e)
+
+        # 7. Notify
         logger.info("ROLLOVER COMPLETE: {}:{} {} -> {} (new token={})",
                     symbol, exchange, old_contract, new_session.contract_symbol, new_token)
         try:
