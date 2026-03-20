@@ -132,20 +132,16 @@ function Screen1Panel({
 // ── Screen 2 (Wave) ───────────────────────────────────────────
 
 function Screen2Panel({
-  symbol, exchange, label, interval, days, height, zoomed, onZoom, onDataLoaded,
+  symbol, exchange, label, interval, days, height, zoomed, onZoom,
 }: {
   symbol: string; exchange: string; label: string;
   interval: string; days: number; height: number;
   zoomed: boolean; onZoom: () => void;
-  onDataLoaded?: (candles: CandleData[], indicators: IndicatorData | null) => void;
 }) {
   const { candles, indicators, runningBar, loading, error, source } = useScreenData(symbol, exchange, interval, days, 2);
 
-  useEffect(() => {
-    if (onDataLoaded && candles.length > 0) {
-      onDataLoaded(candles, indicators ?? null);
-    }
-  }, [candles, indicators, onDataLoaded]);
+  // Data sharing with SignalPanel is now via Zustand screenData store
+  // (removed onDataLoaded callback to prevent infinite re-render loops)
 
   const displayCandles = useMemo(() => {
     if (!runningBar || candles.length === 0) return candles;
@@ -311,13 +307,11 @@ export function ThreeScreenView({ symbol, exchange }: ThreeScreenViewProps) {
   // Zoom state
   const [zoomedScreen, setZoomedScreen] = useState<number | null>(null);
 
-  // Screen 2 shares its data with SignalPanel
-  const [s2Candles, setS2Candles] = useState<CandleData[]>([]);
-  const [s2Indicators, setS2Indicators] = useState<IndicatorData | null>(null);
-  const handleS2Data = useCallback((candles: CandleData[], indicators: IndicatorData | null) => {
-    setS2Candles(candles);
-    setS2Indicators(indicators);
-  }, []);
+  // Screen 2 data for SignalPanel — read directly from store
+  const s2tf = screens[1]?.interval ?? "1d";
+  const s2Slice = useTradingStore((s) => s.screenData[s2tf]);
+  const s2Candles = s2Slice?.candles ?? [];
+  const s2Indicators = s2Slice?.indicators ?? null;
 
   const toggleZoom = useCallback((screen: number) => {
     setZoomedScreen((prev) => (prev === screen ? null : screen));
@@ -342,7 +336,6 @@ export function ThreeScreenView({ symbol, exchange }: ThreeScreenViewProps) {
           symbol={symbol} exchange={exchange}
           label={def.label} interval={def.interval} days={def.days} height={def.height}
           zoomed={zoomed} onZoom={onZoom}
-          onDataLoaded={handleS2Data}
         />
       );
     }

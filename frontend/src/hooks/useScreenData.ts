@@ -36,9 +36,6 @@ export function useScreenData(
 
   // Read from Zustand store — this is live-updated by WebSocket
   const slice = useTradingStore((s) => s.screenData[interval]);
-  const setScreenCandles = useTradingStore((s) => s.setScreenCandles);
-  const setScreenIndicators = useTradingStore((s) => s.setScreenIndicators);
-  const setScreenLoading = useTradingStore((s) => s.setScreenLoading);
 
   // Fetch initial data via REST on mount or when symbol/interval changes
   useEffect(() => {
@@ -50,11 +47,12 @@ export function useScreenData(
 
     errorRef.current = null;
     sourceRef.current = null;
-    setScreenLoading(interval, true);
+    // Use getState() to avoid dependency on store actions (which change every render)
+    const store = useTradingStore.getState();
+    store.setScreenLoading(interval, true);
 
     const doFetch = async () => {
       try {
-        // Fetch candles
         const candleRes = interval === "1w"
           ? await fetchWeekly(symbol, exchange, days)
           : await fetchCandles(symbol, exchange, interval, days);
@@ -63,19 +61,18 @@ export function useScreenData(
 
         if (candleRes.error || !candleRes.data || candleRes.data.length === 0) {
           errorRef.current = candleRes.error || "No data available";
-          setScreenLoading(interval, false);
+          useTradingStore.getState().setScreenLoading(interval, false);
           return;
         }
 
         sourceRef.current = candleRes.source || "live";
-        setScreenCandles(interval, candleRes.data);
+        useTradingStore.getState().setScreenCandles(interval, candleRes.data);
 
-        // Fetch indicators
         try {
           const indRes = await fetchIndicators(symbol, exchange, interval, days, screen);
           if (ctrl.signal.aborted) return;
           if (indRes.data) {
-            setScreenIndicators(interval, indRes.data);
+            useTradingStore.getState().setScreenIndicators(interval, indRes.data);
           }
         } catch {
           // Indicators are non-critical
@@ -85,14 +82,15 @@ export function useScreenData(
         errorRef.current = e.message || "Failed to fetch data";
       } finally {
         if (!ctrl.signal.aborted) {
-          setScreenLoading(interval, false);
+          useTradingStore.getState().setScreenLoading(interval, false);
         }
       }
     };
 
     doFetch();
     return () => ctrl.abort();
-  }, [symbol, exchange, interval, days, screen, setScreenCandles, setScreenIndicators, setScreenLoading]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, exchange, interval, days, screen]);
 
   return {
     candles: slice?.candles ?? [],
