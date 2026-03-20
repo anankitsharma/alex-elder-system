@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTradingStore } from "@/store/useTradingStore";
 import { WebSocketManager } from "@/lib/websocketManager";
-import { fetchHealth, fetchTradingMode } from "@/lib/api";
+import { fetchHealth, fetchTradingMode, fetchCommandCenter } from "@/lib/api";
 
 // Module-level singleton so components can access it
 let _wsManager: WebSocketManager | null = null;
@@ -49,6 +49,12 @@ export function usePipelineInit() {
         store.setApiOnline(false);
         store.setDataFreshness("disconnected");
       }
+
+      // Fetch command center data for dashboard
+      try {
+        const cc = await fetchCommandCenter();
+        store.setCommandCenterAssets(cc.assets);
+      } catch { /* pipeline may not be ready yet */ }
 
       try {
         const mode = await fetchTradingMode();
