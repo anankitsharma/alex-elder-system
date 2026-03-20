@@ -374,9 +374,17 @@ export default function TradingViewChart({
 
   /* ── data update (candles + indicators in one effect) ─────── */
 
+  // Track symbol to detect changes (triggers fitContent on symbol switch)
+  const prevSymbolRef = useRef("");
+  const currentSymbol = candles.length > 0 ? candles[0].timestamp : "";
+
   useEffect(() => {
     const s = seriesRef.current;
-    if (!s.candles || candles.length === 0) return;
+    if (!s.candles || candles.length === 0) {
+      // Reset count when candles cleared (symbol change)
+      prevCandleCountRef.current = 0;
+      return;
+    }
 
     try {
 
@@ -412,12 +420,14 @@ export default function TradingViewChart({
       s.volume.setData(vd);
     }
 
-    // Only fitContent + sync on INITIAL load (candle count 0→N) or symbol change.
+    // fitContent on initial load, symbol change, or big candle count change
     const isInitialLoad = prevCandleCountRef.current === 0 && candles.length > 0;
-    const isSymbolChange = candles.length > 0 && candles.length !== prevCandleCountRef.current
+    const symbolChanged = currentSymbol !== prevSymbolRef.current && currentSymbol !== "";
+    const isBigCountChange = candles.length > 0 && candles.length !== prevCandleCountRef.current
       && Math.abs(candles.length - prevCandleCountRef.current) > 5;
+    prevSymbolRef.current = currentSymbol;
 
-    if (isInitialLoad || isSymbolChange) {
+    if (isInitialLoad || symbolChanged || isBigCountChange) {
       const mainChart = chartsRef.current[0];
       if (mainChart) {
         syncingRef.current = true;

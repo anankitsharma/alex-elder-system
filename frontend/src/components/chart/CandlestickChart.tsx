@@ -168,13 +168,24 @@ export function CandlestickChart({
   // Update data — only full setData on initial load or count change
   const lastSetCountRef = useRef(0);
 
+  const prevFirstTsRef = useRef("");
+
   useEffect(() => {
     const refs = seriesRefs.current;
-    if (!refs.candles || candles.length === 0) return;
+    if (!refs.candles || candles.length === 0) {
+      lastSetCountRef.current = 0;
+      return;
+    }
 
     try {
 
     const hasImpulse = indicators?.impulse_color && indicators.impulse_color.length > 0;
+
+    // Detect symbol change by checking first candle timestamp
+    const firstTs = candles[0].timestamp;
+    const symbolChanged = firstTs !== prevFirstTsRef.current && prevFirstTsRef.current !== "";
+    if (symbolChanged) lastSetCountRef.current = 0;
+    prevFirstTsRef.current = firstTs;
 
     if (candles.length !== lastSetCountRef.current) {
       const candleData: CandlestickData[] = candles.map((c, i) => {
@@ -220,10 +231,10 @@ export function CandlestickChart({
     if (refs.szLong) refs.szLong.setData(lineData(indicators?.safezone_long));
     if (refs.szShort) refs.szShort.setData(lineData(indicators?.safezone_short));
 
-    // Only fitContent on initial load (0→N) or big symbol change, not every update
+    // fitContent on initial load, symbol change, or big count change
     const isInit = prevCountRef.current === 0 && candles.length > 0;
     const isBigChange = candles.length > 0 && Math.abs(candles.length - prevCountRef.current) > 5;
-    if (isInit || isBigChange) {
+    if (isInit || symbolChanged || isBigChange) {
       chartRef.current?.timeScale().fitContent();
     }
     prevCountRef.current = candles.length;
