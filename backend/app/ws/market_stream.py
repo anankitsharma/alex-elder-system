@@ -175,6 +175,38 @@ async def _heartbeat_loop():
             for ws in disconnected:
                 _pipeline_clients.remove(ws)
 
+        # ── Periodic indicator refresh (every 30s) ──
+        # Recompute indicators using running bar as latest candle
+        if not hasattr(_heartbeat_loop, '_last_ind_refresh'):
+            _heartbeat_loop._last_ind_refresh = 0.0
+        if now - _heartbeat_loop._last_ind_refresh >= 30 and _pipeline_clients:
+            _heartbeat_loop._last_ind_refresh = now
+            for key, session in pipeline_manager._sessions.items():
+                if not session.active:
+                    continue
+                try:
+                    for tf in session.screen_timeframes.values():
+                        # Append running bar to buffer temporarily for indicator calc
+                        builder = session.candle_builders.get(tf)
+                        if not builder or not builder.running_bar:
+                            continue
+                        engine = session._engines.get(tf)
+                        df = session.candle_buffers.get(tf)
+                        if engine and df is not None and not df.empty:
+                            import pandas as pd
+                            running = pd.DataFrame([builder.running_bar])
+                            temp_df = pd.concat([df, running], ignore_index=True)
+                            screen_num = session._tf_to_screen(tf)
+                            indicators = engine.compute_for_screen(temp_df, screen_num)
+                            await broadcast_pipeline_event({
+                                "type": "indicators",
+                                "symbol": session.symbol,
+                                "timeframe": tf,
+                                "data": indicators,
+                            })
+                except Exception as e:
+                    logger.debug("Periodic indicator refresh failed for {}: {}", key, e)
+
         await asyncio.sleep(0.05)  # 50ms poll cycle
 
 
