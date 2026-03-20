@@ -1,14 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { CandlestickChart } from "./CandlestickChart";
-import { MACDChart } from "./MACDChart";
-import ElderRayChart from "./ElderRayChart";
-import ForceIndexChart from "./ForceIndexChart";
+import TradingViewChart from "./TradingViewChart";
 import SignalPanel from "@/components/panels/SignalPanel";
 import { useScreenData } from "@/hooks/useScreenData";
-import { fetchScreenConfig, type ScreenConfig, type CandleData, type IndicatorData } from "@/lib/api";
-import { Loader2, Maximize2, Minimize2, Radio } from "lucide-react";
+import { fetchScreenConfig, type ScreenConfig } from "@/lib/api";
+import { Loader2, Maximize2, Minimize2 } from "lucide-react";
 import { useTradingStore } from "@/store/useTradingStore";
 
 interface ThreeScreenViewProps {
@@ -30,38 +27,23 @@ interface ScreenDef {
   label: string;
   interval: string;
   days: number;
-  height: number;
   screen: number;
 }
 
-// ── Shared screen header with zoom button + live indicator ───────
+// ── Screen header ─────────────────────────────────────────────
 
 function ScreenHeader({
-  label,
-  source,
-  barCount,
-  zoomed,
-  onZoom,
-  hasRunningBar,
+  label, source, barCount, zoomed, onZoom,
 }: {
   label: string;
   source: "live" | "demo" | null;
   barCount: number;
   zoomed: boolean;
   onZoom: () => void;
-  hasRunningBar?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between px-2 py-1 text-[11px]">
-      <div className="flex items-center gap-1.5">
-        <span className="font-medium text-foreground">{label}</span>
-        {hasRunningBar && (
-          <span className="flex items-center gap-0.5 text-green-500">
-            <Radio className="w-2.5 h-2.5 animate-pulse" />
-            <span className="text-[9px]">LIVE</span>
-          </span>
-        )}
-      </div>
+      <span className="font-medium text-foreground">{label}</span>
       <div className="flex items-center gap-2">
         {source === "demo" && barCount > 0 && (
           <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber/15 text-amber">
@@ -83,27 +65,24 @@ function ScreenHeader({
   );
 }
 
-// ── Screen 1 (Tide) ───────────────────────────────────────────
+// ── Unified Screen Panel using TradingViewChart ──────────────
 
-function Screen1Panel({
-  symbol, exchange, label, interval, days, height, zoomed, onZoom,
+function ScreenPanel({
+  symbol, exchange, label, interval, days, screen, zoomed, onZoom,
+  showMACD = false, showForceIndex = false, showElderRay = false,
 }: {
   symbol: string; exchange: string; label: string;
-  interval: string; days: number; height: number;
+  interval: string; days: number; screen: number;
   zoomed: boolean; onZoom: () => void;
+  showMACD?: boolean; showForceIndex?: boolean; showElderRay?: boolean;
 }) {
-  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 1);
+  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, screen);
 
-  // Don't merge running bar into candles array — it causes setData() conflicts
-  // in lightweight-charts. The running bar is handled by the chart's update() method.
-
-  const chartH = zoomed ? 420 : height;
-  const macdH = zoomed ? 150 : 100;
-  const placeholderH = chartH + macdH + 20;
+  const placeholderH = zoomed ? 600 : 300;
 
   return (
     <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
+      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} />
       {loading ? (
         <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
           <Loader2 className="w-5 h-5 text-muted animate-spin" />
@@ -112,103 +91,21 @@ function Screen1Panel({
         <div className="flex items-center justify-center bg-surface border border-border rounded text-xs text-red" style={{ height: placeholderH }}>
           {error}
         </div>
-      ) : (
-        <>
-          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
-          <MACDChart candles={candles} indicators={indicators} height={macdH} />
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── Screen 2 (Wave) ───────────────────────────────────────────
-
-function Screen2Panel({
-  symbol, exchange, label, interval, days, height, zoomed, onZoom,
-}: {
-  symbol: string; exchange: string; label: string;
-  interval: string; days: number; height: number;
-  zoomed: boolean; onZoom: () => void;
-}) {
-  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 2);
-
-  const timestamps = indicators?.timestamps ?? [];
-  const chartH = zoomed ? 400 : height;
-  const macdH = zoomed ? 140 : 90;
-  const fiH = zoomed ? 120 : 80;
-  const erH = zoomed ? 120 : 80;
-  const placeholderH = chartH + macdH + fiH + erH + 20;
-
-  return (
-    <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
-      {loading ? (
-        <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
-          <Loader2 className="w-5 h-5 text-muted animate-spin" />
-        </div>
-      ) : error ? (
-        <div className="flex items-center justify-center bg-surface border border-border rounded text-xs text-red" style={{ height: placeholderH }}>
-          {error}
+      ) : candles.length === 0 ? (
+        <div className="flex items-center justify-center bg-surface border border-border rounded text-xs text-muted" style={{ height: placeholderH }}>
+          No data
         </div>
       ) : (
-        <>
-          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
-          <MACDChart candles={candles} indicators={indicators} height={macdH} />
-          <ForceIndexChart
-            timestamps={timestamps}
-            forceIndex2={indicators?.force_index_2 ?? undefined}
-            forceIndex13={indicators?.force_index ?? undefined}
-            height={fiH}
+        <div style={{ height: zoomed ? 700 : 350 }}>
+          <TradingViewChart
+            candles={candles}
+            indicators={indicators}
+            showVolume={zoomed}
+            showMACD={showMACD}
+            showForceIndex={showForceIndex}
+            showElderRay={showElderRay}
           />
-          <ElderRayChart
-            timestamps={timestamps}
-            bullPower={indicators?.elder_ray_bull ?? []}
-            bearPower={indicators?.elder_ray_bear ?? []}
-            height={erH}
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── Screen 3 (Ripple) ─────────────────────────────────────────
-
-function Screen3Panel({
-  symbol, exchange, label, interval, days, height, zoomed, onZoom,
-}: {
-  symbol: string; exchange: string; label: string;
-  interval: string; days: number; height: number;
-  zoomed: boolean; onZoom: () => void;
-}) {
-  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 3);
-
-  const timestamps = indicators?.timestamps ?? [];
-  const chartH = zoomed ? 420 : height;
-  const fiH = zoomed ? 140 : 80;
-  const placeholderH = chartH + fiH + 20;
-
-  return (
-    <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
-      {loading ? (
-        <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
-          <Loader2 className="w-5 h-5 text-muted animate-spin" />
         </div>
-      ) : error ? (
-        <div className="flex items-center justify-center bg-surface border border-border rounded text-xs text-red" style={{ height: placeholderH }}>
-          {error}
-        </div>
-      ) : (
-        <>
-          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
-          <ForceIndexChart
-            timestamps={timestamps}
-            forceIndex2={indicators?.force_index_2 ?? undefined}
-            height={fiH}
-          />
-        </>
       )}
     </div>
   );
@@ -219,15 +116,15 @@ function Screen3Panel({
 function getDefaultScreens(exchange: string): ScreenDef[] {
   if (exchange === "NFO" || exchange === "MCX") {
     return [
-      { label: "Screen 1 — Daily (Tide)", interval: "1d", days: 365, height: 220, screen: 1 },
-      { label: "Screen 2 — Hourly (Wave)", interval: "1h", days: 90, height: 200, screen: 2 },
-      { label: "Screen 3 — 15min (Ripple)", interval: "15m", days: 30, height: 200, screen: 3 },
+      { label: "Screen 1 — Daily (Tide)", interval: "1d", days: 365, screen: 1 },
+      { label: "Screen 2 — Hourly (Wave)", interval: "1h", days: 90, screen: 2 },
+      { label: "Screen 3 — 15min (Ripple)", interval: "15m", days: 30, screen: 3 },
     ];
   }
   return [
-    { label: "Screen 1 — Weekly (Tide)", interval: "1w", days: 730, height: 220, screen: 1 },
-    { label: "Screen 2 — Daily (Wave)", interval: "1d", days: 365, height: 200, screen: 2 },
-    { label: "Screen 3 — Intraday (Ripple)", interval: "15m", days: 30, height: 200, screen: 3 },
+    { label: "Screen 1 — Weekly (Tide)", interval: "1w", days: 730, screen: 1 },
+    { label: "Screen 2 — Daily (Wave)", interval: "1d", days: 365, screen: 2 },
+    { label: "Screen 3 — Intraday (Ripple)", interval: "15m", days: 30, screen: 3 },
   ];
 }
 
@@ -244,15 +141,15 @@ function useScreenConfig(symbol: string, exchange: string): ScreenDef[] {
         setScreens([
           {
             label: `Screen 1 — ${TF_LABELS[s1tf] ?? s1tf} (Tide)`,
-            interval: s1tf, days: TF_DAYS[s1tf] ?? 365, height: 220, screen: 1,
+            interval: s1tf, days: TF_DAYS[s1tf] ?? 365, screen: 1,
           },
           {
             label: `Screen 2 — ${TF_LABELS[s2tf] ?? s2tf} (Wave)`,
-            interval: s2tf, days: TF_DAYS[s2tf] ?? 365, height: 200, screen: 2,
+            interval: s2tf, days: TF_DAYS[s2tf] ?? 365, screen: 2,
           },
           {
             label: `Screen 3 — ${TF_LABELS[s3tf] ?? s3tf} (Ripple)`,
-            interval: s3tf, days: TF_DAYS[s3tf] ?? 30, height: 200, screen: 3,
+            interval: s3tf, days: TF_DAYS[s3tf] ?? 30, screen: 3,
           },
         ]);
       })
@@ -279,43 +176,36 @@ export function ThreeScreenView({ symbol, exchange }: ThreeScreenViewProps) {
   // Zoom state
   const [zoomedScreen, setZoomedScreen] = useState<number | null>(null);
 
-  // Screen 2 data for SignalPanel — read directly from store
+  const toggleZoom = useCallback((screen: number) => {
+    setZoomedScreen((prev) => (prev === screen ? null : screen));
+  }, []);
+
+  // Screen 2 data for SignalPanel from store
   const s2tf = screens[1]?.interval ?? "1d";
   const s2Slice = useTradingStore((s) => s.screenData[s2tf]);
   const s2Candles = s2Slice?.candles ?? [];
   const s2Indicators = s2Slice?.indicators ?? null;
 
-  const toggleZoom = useCallback((screen: number) => {
-    setZoomedScreen((prev) => (prev === screen ? null : screen));
-  }, []);
-
+  // Sub-pane config per screen (Elder's methodology):
+  // Screen 1 (Tide): Candle + MACD
+  // Screen 2 (Wave): Candle + MACD + Force Index + Elder-Ray (full suite)
+  // Screen 3 (Ripple): Candle + Force Index
   const renderScreen = (screenIdx: number, zoomed: boolean) => {
     const def = screens[screenIdx];
     const onZoom = () => toggleZoom(screenIdx + 1);
 
-    if (screenIdx === 0) {
-      return (
-        <Screen1Panel
-          symbol={symbol} exchange={exchange}
-          label={def.label} interval={def.interval} days={def.days} height={def.height}
-          zoomed={zoomed} onZoom={onZoom}
-        />
-      );
-    }
-    if (screenIdx === 1) {
-      return (
-        <Screen2Panel
-          symbol={symbol} exchange={exchange}
-          label={def.label} interval={def.interval} days={def.days} height={def.height}
-          zoomed={zoomed} onZoom={onZoom}
-        />
-      );
-    }
+    const subPanes = screenIdx === 0
+      ? { showMACD: true, showForceIndex: false, showElderRay: false }
+      : screenIdx === 1
+      ? { showMACD: true, showForceIndex: true, showElderRay: true }
+      : { showMACD: false, showForceIndex: true, showElderRay: false };
+
     return (
-      <Screen3Panel
+      <ScreenPanel
         symbol={symbol} exchange={exchange}
-        label={def.label} interval={def.interval} days={def.days} height={def.height}
+        label={def.label} interval={def.interval} days={def.days} screen={def.screen}
         zoomed={zoomed} onZoom={onZoom}
+        {...subPanes}
       />
     );
   };
@@ -330,7 +220,7 @@ export function ThreeScreenView({ symbol, exchange }: ThreeScreenViewProps) {
   );
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2 overflow-auto p-1">
       {zoomedScreen != null ? (
         <div className="flex flex-col gap-2">
           {renderScreen(zoomedScreen - 1, true)}
@@ -338,8 +228,8 @@ export function ThreeScreenView({ symbol, exchange }: ThreeScreenViewProps) {
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-2">
           {renderScreen(0, false)}
-          {showScreen >= 2 ? renderScreen(1, false) : loadingPlaceholder(screens[1].height + 120)}
-          {showScreen >= 3 ? renderScreen(2, false) : loadingPlaceholder(screens[2].height + 90)}
+          {showScreen >= 2 ? renderScreen(1, false) : loadingPlaceholder(350)}
+          {showScreen >= 3 ? renderScreen(2, false) : loadingPlaceholder(350)}
         </div>
       )}
       <div className="border border-border rounded bg-surface">
