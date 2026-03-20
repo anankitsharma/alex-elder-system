@@ -369,16 +369,11 @@ export default function TradingViewChart({
     };
   }, [buildCharts]);
 
-  /* ── candle data (only when candles array changes) ───────── */
-
-  const prevCandlesRef = useRef<CandleData[]>([]);
+  /* ── data update (candles + indicators in one effect) ─────── */
 
   useEffect(() => {
     const s = seriesRef.current;
     if (!s.candles || candles.length === 0) return;
-    // Skip if candles haven't actually changed (indicator-only update)
-    if (candles === prevCandlesRef.current) return;
-    prevCandlesRef.current = candles;
 
     const hasImpulse = indicators?.impulse_color?.some((v) => v != null);
 
@@ -439,14 +434,8 @@ export default function TradingViewChart({
       }
     }
     prevCandleCountRef.current = candles.length;
-  }, [candles, indicators]);
 
-  /* ── indicator overlay data (updates without resetting scroll) ── */
-
-  useEffect(() => {
-    const s = seriesRef.current;
-    if (!s.candles) return;
-
+    // ── Indicator overlays + sub-charts ──
     const indTs = indicators?.timestamps ?? [];
     const indLen = indTs.length;
 
@@ -521,8 +510,7 @@ export default function TradingViewChart({
         val <= 0 ? "#ef5350" : "#ef535060"
       ));
     }
-    // Indicator-only updates: no fitContent, no scroll reset
-  }, [indicators]);
+  }, [candles, indicators]);
 
   /* ── running bar — incremental update via series.update() ───── */
 

@@ -126,9 +126,13 @@ export default function ForceIndexChart({
     };
   }, [height, !!forceIndex2, !!forceIndex13, theme]);
 
+  const lastFiCountRef = useRef(0);
+
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!timestamps.length) return;
+    if (timestamps.length === lastFiCountRef.current) return;
+    lastFiCountRef.current = timestamps.length;
 
     const T = "rgba(0,0,0,0)";
 

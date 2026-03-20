@@ -113,9 +113,14 @@ export function MACDChart({ candles, indicators, height = 120 }: MACDChartProps)
     };
   }, [height, theme]);
 
+  const lastMacdCountRef = useRef(0);
+
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.histogram || !indicators || candles.length === 0) return;
+    // Only setData when candle count changes (not on indicator-only updates)
+    if (candles.length === lastMacdCountRef.current) return;
+    lastMacdCountRef.current = candles.length;
 
     const T = "rgba(0,0,0,0)";
     const histData: HistogramData[] = candles.map((c, i) => {

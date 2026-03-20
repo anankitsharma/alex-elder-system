@@ -164,35 +164,43 @@ export function CandlestickChart({
     };
   }, [height, showVolume, theme]);
 
-  // Update data
+  // Update data — only full setData on initial load or count change
+  const lastSetCountRef = useRef(0);
+
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.candles || candles.length === 0) return;
 
     const hasImpulse = indicators?.impulse_color && indicators.impulse_color.length > 0;
 
-    const candleData: CandlestickData[] = candles.map((c, i) => {
-      const base: CandlestickData = {
-        time: toTime(c.timestamp), open: c.open, high: c.high, low: c.low, close: c.close,
-      };
-      if (hasImpulse && indicators?.impulse_color[i]) {
-        const colors = IMPULSE_MAP[indicators.impulse_color[i] as string];
-        if (colors) return { ...base, color: colors.up, borderColor: colors.up, wickColor: colors.wickUp };
-      }
-      return base;
-    });
-    refs.candles.setData(candleData);
-
-    if (refs.volume) {
-      const volData: HistogramData[] = candles.map((c, i) => {
-        let color = c.close >= c.open ? "#22c55e40" : "#ef444440";
+    // Only call setData when candle count changes (initial load, new bar, symbol change)
+    // Skip when only indicators updated (same candle count)
+    if (candles.length !== lastSetCountRef.current) {
+      const candleData: CandlestickData[] = candles.map((c, i) => {
+        const base: CandlestickData = {
+          time: toTime(c.timestamp), open: c.open, high: c.high, low: c.low, close: c.close,
+        };
         if (hasImpulse && indicators?.impulse_color[i]) {
-          const ic = indicators.impulse_color[i];
-          color = ic === "green" ? "#22c55e40" : ic === "red" ? "#ef444440" : "#6366f130";
+          const colors = IMPULSE_MAP[indicators.impulse_color[i] as string];
+          if (colors) return { ...base, color: colors.up, borderColor: colors.up, wickColor: colors.wickUp };
         }
-        return { time: toTime(c.timestamp), value: c.volume, color };
+        return base;
       });
-      refs.volume.setData(volData);
+      refs.candles.setData(candleData);
+
+      if (refs.volume) {
+        const volData: HistogramData[] = candles.map((c, i) => {
+          let color = c.close >= c.open ? "#22c55e40" : "#ef444440";
+          if (hasImpulse && indicators?.impulse_color[i]) {
+            const ic = indicators.impulse_color[i];
+            color = ic === "green" ? "#22c55e40" : ic === "red" ? "#ef444440" : "#6366f130";
+          }
+          return { time: toTime(c.timestamp), value: c.volume, color };
+        });
+        refs.volume.setData(volData);
+      }
+
+      lastSetCountRef.current = candles.length;
     }
 
     // Overlays are on the SAME chart as candles — skip nulls (don't pad with 0,

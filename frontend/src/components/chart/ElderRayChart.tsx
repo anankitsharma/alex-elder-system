@@ -107,10 +107,14 @@ export default function ElderRayChart({
     };
   }, [height, theme]);
 
+  const lastErCountRef = useRef(0);
+
   useEffect(() => {
     const refs = seriesRefs.current;
     if (!refs.bull || !refs.bear) return;
     if (!timestamps.length) return;
+    if (timestamps.length === lastErCountRef.current) return;
+    lastErCountRef.current = timestamps.length;
 
     const T = "rgba(0,0,0,0)";
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { CandlestickChart } from "./CandlestickChart";
 import { MACDChart } from "./MACDChart";
 import ElderRayChart from "./ElderRayChart";
@@ -92,17 +92,10 @@ function Screen1Panel({
   interval: string; days: number; height: number;
   zoomed: boolean; onZoom: () => void;
 }) {
-  const { candles, indicators, runningBar, loading, error, source } = useScreenData(symbol, exchange, interval, days, 1);
+  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 1);
 
-  // Merge running bar into display candles
-  const displayCandles = useMemo(() => {
-    if (!runningBar || candles.length === 0) return candles;
-    const last = candles[candles.length - 1];
-    if (last.timestamp === runningBar.timestamp) {
-      return [...candles.slice(0, -1), runningBar];
-    }
-    return [...candles, runningBar];
-  }, [candles, runningBar]);
+  // Don't merge running bar into candles array — it causes setData() conflicts
+  // in lightweight-charts. The running bar is handled by the chart's update() method.
 
   const chartH = zoomed ? 420 : height;
   const macdH = zoomed ? 150 : 100;
@@ -110,7 +103,7 @@ function Screen1Panel({
 
   return (
     <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={!!runningBar} />
+      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
       {loading ? (
         <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
           <Loader2 className="w-5 h-5 text-muted animate-spin" />
@@ -121,8 +114,8 @@ function Screen1Panel({
         </div>
       ) : (
         <>
-          <CandlestickChart candles={displayCandles} indicators={indicators} height={chartH} showVolume={zoomed} />
-          <MACDChart candles={displayCandles} indicators={indicators} height={macdH} />
+          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
+          <MACDChart candles={candles} indicators={indicators} height={macdH} />
         </>
       )}
     </div>
@@ -138,19 +131,7 @@ function Screen2Panel({
   interval: string; days: number; height: number;
   zoomed: boolean; onZoom: () => void;
 }) {
-  const { candles, indicators, runningBar, loading, error, source } = useScreenData(symbol, exchange, interval, days, 2);
-
-  // Data sharing with SignalPanel is now via Zustand screenData store
-  // (removed onDataLoaded callback to prevent infinite re-render loops)
-
-  const displayCandles = useMemo(() => {
-    if (!runningBar || candles.length === 0) return candles;
-    const last = candles[candles.length - 1];
-    if (last.timestamp === runningBar.timestamp) {
-      return [...candles.slice(0, -1), runningBar];
-    }
-    return [...candles, runningBar];
-  }, [candles, runningBar]);
+  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 2);
 
   const timestamps = indicators?.timestamps ?? [];
   const chartH = zoomed ? 400 : height;
@@ -161,7 +142,7 @@ function Screen2Panel({
 
   return (
     <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={!!runningBar} />
+      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
       {loading ? (
         <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
           <Loader2 className="w-5 h-5 text-muted animate-spin" />
@@ -172,8 +153,8 @@ function Screen2Panel({
         </div>
       ) : (
         <>
-          <CandlestickChart candles={displayCandles} indicators={indicators} height={chartH} showVolume={zoomed} />
-          <MACDChart candles={displayCandles} indicators={indicators} height={macdH} />
+          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
+          <MACDChart candles={candles} indicators={indicators} height={macdH} />
           <ForceIndexChart
             timestamps={timestamps}
             forceIndex2={indicators?.force_index_2 ?? undefined}
@@ -201,16 +182,7 @@ function Screen3Panel({
   interval: string; days: number; height: number;
   zoomed: boolean; onZoom: () => void;
 }) {
-  const { candles, indicators, runningBar, loading, error, source } = useScreenData(symbol, exchange, interval, days, 3);
-
-  const displayCandles = useMemo(() => {
-    if (!runningBar || candles.length === 0) return candles;
-    const last = candles[candles.length - 1];
-    if (last.timestamp === runningBar.timestamp) {
-      return [...candles.slice(0, -1), runningBar];
-    }
-    return [...candles, runningBar];
-  }, [candles, runningBar]);
+  const { candles, indicators, loading, error, source } = useScreenData(symbol, exchange, interval, days, 3);
 
   const timestamps = indicators?.timestamps ?? [];
   const chartH = zoomed ? 420 : height;
@@ -219,7 +191,7 @@ function Screen3Panel({
 
   return (
     <div className="flex flex-col relative">
-      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={!!runningBar} />
+      <ScreenHeader label={label} source={source} barCount={candles.length} zoomed={zoomed} onZoom={onZoom} hasRunningBar={false} />
       {loading ? (
         <div className="flex items-center justify-center bg-surface border border-border rounded" style={{ height: placeholderH }}>
           <Loader2 className="w-5 h-5 text-muted animate-spin" />
@@ -230,7 +202,7 @@ function Screen3Panel({
         </div>
       ) : (
         <>
-          <CandlestickChart candles={displayCandles} indicators={indicators} height={chartH} showVolume={zoomed} />
+          <CandlestickChart candles={candles} indicators={indicators} height={chartH} showVolume={zoomed} />
           <ForceIndexChart
             timestamps={timestamps}
             forceIndex2={indicators?.force_index_2 ?? undefined}
