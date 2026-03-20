@@ -95,7 +95,6 @@ export function CandlestickChart({
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 10,
-        shiftVisibleRangeOnNewBar: true,
       },
     });
 

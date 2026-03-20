@@ -185,7 +185,6 @@ export default function TradingViewChart({
           timeVisible: true,
           secondsVisible: false,
           rightOffset: 20,               // Empty space on right (like TradingView)
-          shiftVisibleRangeOnNewBar: true, // Auto-scroll on new bars
         },
       });
 
@@ -370,11 +369,16 @@ export default function TradingViewChart({
     };
   }, [buildCharts]);
 
-  /* ── full data load (initial + symbol/interval change) ─────── */
+  /* ── candle data (only when candles array changes) ───────── */
+
+  const prevCandlesRef = useRef<CandleData[]>([]);
 
   useEffect(() => {
     const s = seriesRef.current;
     if (!s.candles || candles.length === 0) return;
+    // Skip if candles haven't actually changed (indicator-only update)
+    if (candles === prevCandlesRef.current) return;
+    prevCandlesRef.current = candles;
 
     const hasImpulse = indicators?.impulse_color?.some((v) => v != null);
 
@@ -408,10 +412,41 @@ export default function TradingViewChart({
       s.volume.setData(vd);
     }
 
-    // Sub-chart data uses indicator timestamps as the source of truth.
-    // This decouples sub-charts from candle count — even if candles and
-    // indicators have different lengths, each chart shows all its own data.
-    // Time-based sync (not logical-index) keeps them aligned on scroll.
+    // Only fitContent + sync on INITIAL load (candle count 0→N) or symbol change.
+    const isInitialLoad = prevCandleCountRef.current === 0 && candles.length > 0;
+    const isSymbolChange = candles.length > 0 && candles.length !== prevCandleCountRef.current
+      && Math.abs(candles.length - prevCandleCountRef.current) > 5;
+
+    if (isInitialLoad || isSymbolChange) {
+      const mainChart = chartsRef.current[0];
+      if (mainChart) {
+        syncingRef.current = true;
+        mainChart.timeScale().fitContent();
+        const doSync = () => {
+          try {
+            const range = mainChart.timeScale().getVisibleRange();
+            if (range) {
+              chartsRef.current.forEach((c, idx) => {
+                if (idx > 0) {
+                  try { c.timeScale().setVisibleRange(range); } catch { /* ok */ }
+                }
+              });
+            }
+          } catch { /* disposed */ }
+        };
+        setTimeout(doSync, 50);
+        setTimeout(() => { doSync(); syncingRef.current = false; }, 200);
+      }
+    }
+    prevCandleCountRef.current = candles.length;
+  }, [candles, indicators]);
+
+  /* ── indicator overlay data (updates without resetting scroll) ── */
+
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s.candles) return;
+
     const indTs = indicators?.timestamps ?? [];
     const indLen = indTs.length;
 
@@ -486,39 +521,8 @@ export default function TradingViewChart({
         val <= 0 ? "#ef5350" : "#ef535060"
       ));
     }
-
-    // Only fitContent + sync on INITIAL load (candle count 0→N) or symbol change.
-    // Do NOT call on indicator updates or running bar changes — that would
-    // reset user's zoom/scroll position on every tick.
-    const isInitialLoad = prevCandleCountRef.current === 0 && candles.length > 0;
-    const isSymbolChange = candles.length > 0 && candles.length !== prevCandleCountRef.current
-      && Math.abs(candles.length - prevCandleCountRef.current) > 5;
-
-    if (isInitialLoad || isSymbolChange) {
-      const mainChart = chartsRef.current[0];
-      if (mainChart) {
-        syncingRef.current = true;
-        mainChart.timeScale().fitContent();
-
-        const doSync = () => {
-          try {
-            const range = mainChart.timeScale().getVisibleRange();
-            if (range) {
-              chartsRef.current.forEach((c, idx) => {
-                if (idx > 0) {
-                  try { c.timeScale().setVisibleRange(range); } catch { /* ok */ }
-                }
-              });
-            }
-          } catch { /* disposed */ }
-        };
-
-        setTimeout(doSync, 50);
-        setTimeout(() => { doSync(); syncingRef.current = false; }, 200);
-      }
-    }
-    prevCandleCountRef.current = candles.length;
-  }, [candles, indicators]);
+    // Indicator-only updates: no fitContent, no scroll reset
+  }, [indicators]);
 
   /* ── running bar — incremental update via series.update() ───── */
 
