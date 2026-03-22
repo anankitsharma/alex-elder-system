@@ -16,6 +16,7 @@ import DashboardView from "@/components/views/DashboardView";
 import SettingsView from "@/components/views/SettingsView";
 import AssetDetailView from "@/components/views/AssetDetailView";
 import PerformanceView from "@/components/views/PerformanceView";
+import AssetsView from "@/components/views/AssetsView";
 import SymbolSearch from "@/components/ui/SymbolSearch";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PipelineStatusBar } from "@/components/layout/PipelineStatusBar";
@@ -184,7 +185,8 @@ function Dashboard() {
         case "4": setView("signals"); break;
         case "5": setView("risk"); break;
         case "6": setView("performance"); break;
-        case "7": setView("portfolio"); break;
+        case "7": setView("assets"); break;
+        case "8": setView("portfolio"); break;
         case "Escape":
           if (view === "asset-detail") setView("dashboard");
           break;
@@ -406,6 +408,13 @@ function Dashboard() {
         {view === "performance" && (
           <ErrorBoundary label="Performance">
             <PerformanceView />
+          </ErrorBoundary>
+        )}
+
+        {/* ═══════ Assets ════════════════════════════════════ */}
+        {view === "assets" && (
+          <ErrorBoundary label="Assets">
+            <AssetsView />
           </ErrorBoundary>
         )}
 

@@ -14,11 +14,12 @@ import {
   Moon,
   LineChart,
   LogOut,
+  Package,
 } from "lucide-react";
 import { NotificationBell } from "@/components/ui/NotificationCenter";
 import { useAuthStore } from "@/store/useAuthStore";
 
-export type ViewId = "dashboard" | "charts" | "trades" | "signals" | "risk" | "portfolio" | "performance" | "settings" | "asset-detail";
+export type ViewId = "dashboard" | "charts" | "trades" | "signals" | "risk" | "portfolio" | "performance" | "assets" | "settings" | "asset-detail";
 
 const NAV: { id: ViewId; icon: typeof LayoutDashboard; label: string }[] = [
   { id: "dashboard", icon: LayoutDashboard, label: "Overview" },
@@ -27,6 +28,7 @@ const NAV: { id: ViewId; icon: typeof LayoutDashboard; label: string }[] = [
   { id: "signals",   icon: Zap,             label: "Signals" },
   { id: "risk",        icon: Shield,          label: "Risk" },
   { id: "performance", icon: LineChart,      label: "Performance" },
+  { id: "assets",      icon: Package,         label: "Assets" },
   { id: "portfolio",   icon: Wallet,          label: "Portfolio" },
 ];
 
