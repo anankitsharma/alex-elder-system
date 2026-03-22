@@ -38,12 +38,12 @@ const WS_STATE_COLOR: Record<WsState, string> = {
   polling: "text-amber-500/70",
 };
 
-const BROKER_STATUS_CONFIG: Record<string, { color: string; label: string; dot: string }> = {
-  CONNECTED: { color: "text-green-500/70", label: "Broker: ON", dot: "bg-green-500" },
-  CONNECTING: { color: "text-yellow-500/70", label: "Broker: Connecting...", dot: "bg-yellow-500 animate-pulse" },
-  RECONNECTING: { color: "text-yellow-500/70", label: "Broker: Retrying...", dot: "bg-yellow-500 animate-pulse" },
-  OFFLINE: { color: "text-red-500/70", label: "Broker: OFFLINE", dot: "bg-red-500" },
-  UNKNOWN: { color: "text-muted", label: "Broker: --", dot: "bg-gray-500" },
+const BROKER_STATUS_CONFIG: Record<string, { color: string; label: string; dot: string; desc: string }> = {
+  CONNECTED:    { color: "text-green-500/70", label: "Broker: Live",        dot: "bg-green-500",                desc: "Connected to Angel One" },
+  CONNECTING:   { color: "text-yellow-500/70", label: "Broker: Connecting", dot: "bg-yellow-500 animate-pulse", desc: "Connecting to Angel One..." },
+  RECONNECTING: { color: "text-yellow-500/70", label: "Broker: Retrying",  dot: "bg-yellow-500 animate-pulse", desc: "Reconnecting to Angel One..." },
+  OFFLINE:      { color: "text-amber-500/70",  label: "Broker: Demo",      dot: "bg-amber-500",                desc: "Broker offline — using demo data" },
+  UNKNOWN:      { color: "text-muted",         label: "Broker: --",        dot: "bg-gray-500",                 desc: "Status unknown" },
 };
 
 function BrokerStatus() {
@@ -88,11 +88,12 @@ function BrokerStatus() {
   };
 
   const cfg = BROKER_STATUS_CONFIG[status] || BROKER_STATUS_CONFIG.UNKNOWN;
+  const tooltip = error ? `${cfg.desc}\nLast error: ${error}` : cfg.desc;
 
   return (
     <div className="flex items-center gap-1.5">
       <span className={cn("w-1.5 h-1.5 rounded-full", cfg.dot)} />
-      <span className={cn("font-medium", cfg.color)} title={error || undefined}>
+      <span className={cn("font-medium", cfg.color)} title={tooltip}>
         {cfg.label}
       </span>
       {(status === "OFFLINE" || status === "UNKNOWN") && (
@@ -101,12 +102,12 @@ function BrokerStatus() {
           disabled={retrying}
           className={cn(
             "px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors",
-            "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30",
+            "bg-blue-500/20 text-blue-400 hover:bg-blue-500/30",
             retrying && "opacity-50 cursor-not-allowed",
           )}
-          title={error ? `Error: ${error}` : "Retry broker connection"}
+          title={error ? `Last error: ${error}\nClick to retry` : "Retry broker connection"}
         >
-          {retrying ? "Retrying..." : "Retry"}
+          {retrying ? "Connecting..." : "Connect"}
         </button>
       )}
     </div>
