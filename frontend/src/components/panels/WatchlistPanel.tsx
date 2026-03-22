@@ -18,14 +18,15 @@ interface WatchItem {
 }
 
 const DEFAULT_WATCHLIST: WatchItem[] = [
-  { symbol: "NIFTY", exchange: "NFO", token: "51714" },
+  { symbol: "NIFTY", exchange: "NFO", token: "" },
+  { symbol: "BANKNIFTY", exchange: "NFO", token: "" },
   { symbol: "GOLDM", exchange: "MCX", token: "" },
-  { symbol: "RELIANCE", exchange: "NSE", token: "2885" },
-  { symbol: "HDFCBANK", exchange: "NSE", token: "1333" },
-  { symbol: "INFY", exchange: "NSE", token: "1594" },
-  { symbol: "TCS", exchange: "NSE", token: "11536" },
-  { symbol: "SBIN", exchange: "NSE", token: "3045" },
-  { symbol: "ITC", exchange: "NSE", token: "1660" },
+  { symbol: "SILVERM", exchange: "MCX", token: "" },
+  { symbol: "COPPER", exchange: "MCX", token: "" },
+  { symbol: "ALUMINIUM", exchange: "MCX", token: "" },
+  { symbol: "ZINC", exchange: "MCX", token: "" },
+  { symbol: "NATGASMINI", exchange: "MCX", token: "" },
+  { symbol: "CRUDEOILM", exchange: "MCX", token: "" },
 ];
 
 export function WatchlistPanel({ ticks, onSelect }: WatchlistPanelProps) {

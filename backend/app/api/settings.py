@@ -18,12 +18,14 @@ SETTINGS_FILE = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 DEFAULTS: Dict[str, Any] = {
     "watchlist": [
         {"symbol": "NIFTY", "exchange": "NFO"},
-        {"symbol": "RELIANCE", "exchange": "NSE"},
-        {"symbol": "HDFCBANK", "exchange": "NSE"},
-        {"symbol": "INFY", "exchange": "NSE"},
-        {"symbol": "TCS", "exchange": "NSE"},
-        {"symbol": "SBIN", "exchange": "NSE"},
-        {"symbol": "ITC", "exchange": "NSE"},
+        {"symbol": "BANKNIFTY", "exchange": "NFO"},
+        {"symbol": "GOLDM", "exchange": "MCX"},
+        {"symbol": "SILVERM", "exchange": "MCX"},
+        {"symbol": "COPPER", "exchange": "MCX"},
+        {"symbol": "ALUMINIUM", "exchange": "MCX"},
+        {"symbol": "ZINC", "exchange": "MCX"},
+        {"symbol": "NATGASMINI", "exchange": "MCX"},
+        {"symbol": "CRUDEOILM", "exchange": "MCX"},
     ],
     "timeframes": {
         "EQUITY":    {"screen1": "1w", "screen2": "1d", "screen3": "1h"},
