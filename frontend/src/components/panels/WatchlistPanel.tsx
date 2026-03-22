@@ -34,7 +34,16 @@ export function WatchlistPanel({ ticks, onSelect }: WatchlistPanelProps) {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("elder-watchlist");
       if (saved) {
-        try { return JSON.parse(saved); } catch {}
+        try {
+          const parsed = JSON.parse(saved);
+          // If saved list has equity stocks (old defaults), reset to futures-only
+          const hasEquity = parsed.some((w: WatchItem) => w.exchange === "NSE");
+          if (hasEquity) {
+            localStorage.removeItem("elder-watchlist");
+            return DEFAULT_WATCHLIST;
+          }
+          return parsed;
+        } catch {}
       }
     }
     return DEFAULT_WATCHLIST;
