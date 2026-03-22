@@ -668,6 +668,9 @@ async def get_asset_settings(
                 "exchange": s.exchange,
                 "trading_mode": s.trading_mode,
                 "is_active": s.is_active,
+                "screen1_timeframe": s.screen1_timeframe,
+                "screen2_timeframe": s.screen2_timeframe,
+                "screen3_timeframe": s.screen3_timeframe,
                 "max_risk_pct_override": s.max_risk_pct_override,
             }
             for s in settings_list
@@ -675,74 +678,146 @@ async def get_asset_settings(
     }
 
 
-@router.put("/pipeline/asset-settings/{symbol}")
-async def update_asset_settings(
-    symbol: str,
-    exchange: str = Query("NFO"),
-    trading_mode: str = Query(None, regex="^(PAPER|LIVE)$"),
-    is_active: bool = Query(None),
-    user_id: int = Query(1, description="User ID"),
-):
-    """Toggle per-asset trading mode (PAPER/LIVE) or active status.
+class AssetConfigRequest(BaseModel):
+    exchange: str = "NFO"
+    trading_mode: Optional[str] = None  # PAPER or LIVE
+    is_active: Optional[bool] = None
+    screen1_timeframe: Optional[str] = None  # e.g. "1w", "1d"
+    screen2_timeframe: Optional[str] = None  # e.g. "1d", "1h"
+    screen3_timeframe: Optional[str] = None  # e.g. "1h", "15m"
+    max_risk_pct_override: Optional[float] = None
+    user_id: int = 1
 
-    If no settings exist for this user+asset, creates a new record.
+
+@router.put("/pipeline/asset-settings/{symbol}")
+async def update_asset_settings(symbol: str, req: AssetConfigRequest):
+    """Update per-asset configuration: mode, timeframes, risk.
+
+    When timeframes change, the running pipeline session is restarted with
+    new timeframes — historical data is reloaded and indicators recomputed.
     """
     from app.database import async_session
     from sqlalchemy import select
     from app.models.user import UserAssetSettings, User
 
+    VALID_TIMEFRAMES = {"1w", "1d", "4h", "1h", "30m", "15m", "5m", "1m"}
+
+    # Validate timeframes
+    for tf_field in [req.screen1_timeframe, req.screen2_timeframe, req.screen3_timeframe]:
+        if tf_field and tf_field not in VALID_TIMEFRAMES:
+            raise HTTPException(400, f"Invalid timeframe: {tf_field}. Valid: {VALID_TIMEFRAMES}")
+
     async with async_session() as session:
-        # Verify user is approved for LIVE if switching to LIVE
-        if trading_mode == "LIVE":
-            user_result = await session.execute(select(User).where(User.id == user_id))
+        # Verify LIVE approval
+        if req.trading_mode == "LIVE":
+            user_result = await session.execute(select(User).where(User.id == req.user_id))
             user = user_result.scalar_one_or_none()
             if not user or not user.approved_for_live:
-                raise HTTPException(
-                    status_code=403,
-                    detail="User not approved for LIVE trading. Request approval from admin.",
-                )
+                raise HTTPException(403, "User not approved for LIVE trading.")
 
-        # Find or create settings record
+        # Find or create settings
         stmt = select(UserAssetSettings).where(
-            UserAssetSettings.user_id == user_id,
+            UserAssetSettings.user_id == req.user_id,
             UserAssetSettings.symbol == symbol,
-            UserAssetSettings.exchange == exchange,
+            UserAssetSettings.exchange == req.exchange,
         )
         result = await session.execute(stmt)
         asset_settings = result.scalar_one_or_none()
 
         if not asset_settings:
             asset_settings = UserAssetSettings(
-                user_id=user_id, symbol=symbol, exchange=exchange,
+                user_id=req.user_id, symbol=symbol, exchange=req.exchange,
             )
             session.add(asset_settings)
 
-        if trading_mode is not None:
-            asset_settings.trading_mode = trading_mode
-        if is_active is not None:
-            asset_settings.is_active = is_active
+        # Track if timeframes changed (need pipeline restart)
+        tf_changed = False
+        old_tfs = {
+            "1": asset_settings.screen1_timeframe,
+            "2": asset_settings.screen2_timeframe,
+            "3": asset_settings.screen3_timeframe,
+        }
+
+        if req.trading_mode is not None:
+            asset_settings.trading_mode = req.trading_mode
+        if req.is_active is not None:
+            asset_settings.is_active = req.is_active
+        if req.screen1_timeframe is not None:
+            if asset_settings.screen1_timeframe != req.screen1_timeframe:
+                tf_changed = True
+            asset_settings.screen1_timeframe = req.screen1_timeframe
+        if req.screen2_timeframe is not None:
+            if asset_settings.screen2_timeframe != req.screen2_timeframe:
+                tf_changed = True
+            asset_settings.screen2_timeframe = req.screen2_timeframe
+        if req.screen3_timeframe is not None:
+            if asset_settings.screen3_timeframe != req.screen3_timeframe:
+                tf_changed = True
+            asset_settings.screen3_timeframe = req.screen3_timeframe
+        if req.max_risk_pct_override is not None:
+            asset_settings.max_risk_pct_override = req.max_risk_pct_override
 
         await session.commit()
         await session.refresh(asset_settings)
 
-    # Update live AssetSession's mode if pipeline is running
-    try:
-        from app.pipeline import pipeline_manager
-        key = f"{symbol}:{exchange}" if not user_id else f"{symbol}:{exchange}:u{user_id}"
-        pipe_session = pipeline_manager._sessions.get(key)
-        if not pipe_session:
-            pipe_session = pipeline_manager._sessions.get(f"{symbol}:{exchange}")
-        if pipe_session and pipe_session.active:
+    # Apply to running pipeline
+    from app.pipeline import pipeline_manager
+    pipe_session = (
+        pipeline_manager._sessions.get(f"{symbol}:{req.exchange}:u{req.user_id}")
+        or pipeline_manager._sessions.get(f"{symbol}:{req.exchange}")
+    )
+
+    restart_needed = False
+
+    if pipe_session and pipe_session.active:
+        # Update trading mode
+        if req.trading_mode is not None:
             pipe_session._asset_trading_mode = asset_settings.trading_mode
-            logger.info("Updated live pipeline {} mode to {}", symbol, asset_settings.trading_mode)
-    except Exception:
-        pass
+
+        # If timeframes changed, restart the session to reload data
+        if tf_changed:
+            new_tfs = {}
+            if asset_settings.screen1_timeframe:
+                new_tfs["1"] = asset_settings.screen1_timeframe
+            if asset_settings.screen2_timeframe:
+                new_tfs["2"] = asset_settings.screen2_timeframe
+            if asset_settings.screen3_timeframe:
+                new_tfs["3"] = asset_settings.screen3_timeframe
+
+            if new_tfs:
+                restart_needed = True
+                logger.info(
+                    "Timeframe change for {} — restarting pipeline: {} → {}",
+                    symbol, old_tfs, new_tfs,
+                )
+                # Stop and restart with new timeframes
+                await pipeline_manager.stop_tracking(symbol, req.exchange)
+                new_session = await pipeline_manager.start_tracking(
+                    symbol, req.exchange, user_id=req.user_id,
+                )
+                # Override timeframes on the new session
+                new_session.screen_timeframes.update(new_tfs)
+                new_session._asset_trading_mode = asset_settings.trading_mode
+                # Reload historical data + recompute indicators
+                await new_session._load_historical()
+                for tf, df in new_session.candle_buffers.items():
+                    if not df.empty:
+                        screen_num = new_session._tf_to_screen(tf)
+                        engine = new_session._engines.get(tf)
+                        if engine:
+                            new_session.indicators[tf] = engine.compute_for_screen(df, screen_num)
+                logger.info("Pipeline restarted for {} with new timeframes: {}", symbol, new_tfs)
 
     return {
         "symbol": symbol,
-        "exchange": exchange,
+        "exchange": req.exchange,
         "trading_mode": asset_settings.trading_mode,
         "is_active": asset_settings.is_active,
+        "screen1_timeframe": asset_settings.screen1_timeframe,
+        "screen2_timeframe": asset_settings.screen2_timeframe,
+        "screen3_timeframe": asset_settings.screen3_timeframe,
+        "max_risk_pct_override": asset_settings.max_risk_pct_override,
+        "restarted": restart_needed,
     }
 
 

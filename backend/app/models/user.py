@@ -153,6 +153,12 @@ class UserAssetSettings(Base):
     trading_mode: Mapped[str] = mapped_column(String(10), default="PAPER")  # PAPER or LIVE
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # Is pipeline tracking active?
 
+    # Per-asset timeframe overrides (nullable = use asset-class defaults)
+    # Format: "1w", "1d", "1h", "15m", "5m"
+    screen1_timeframe: Mapped[str] = mapped_column(String(10), nullable=True)  # Tide (e.g., "1w")
+    screen2_timeframe: Mapped[str] = mapped_column(String(10), nullable=True)  # Wave (e.g., "1d")
+    screen3_timeframe: Mapped[str] = mapped_column(String(10), nullable=True)  # Entry (e.g., "1h")
+
     # Per-asset risk overrides (nullable = use user defaults)
     max_risk_pct_override: Mapped[float] = mapped_column(Float, nullable=True)
 
