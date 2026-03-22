@@ -579,10 +579,14 @@ export default function DashboardView({
                     text: health ? "Online" : "Offline",
                   },
                   {
-                    icon: wsConnected ? Wifi : WifiOff,
-                    label: "Market Feed",
-                    ok: wsConnected,
-                    text: wsConnected ? "Connected" : "Disconnected",
+                    icon: health?.broker_online ? Wifi : WifiOff,
+                    label: "Broker Feed",
+                    ok: health?.broker_online ?? false,
+                    text: health?.broker_status === "CONNECTED" ? "Live"
+                      : health?.broker_status === "CONNECTING" ? "Connecting..."
+                      : health?.broker_status === "RECONNECTING" ? "Retrying..."
+                      : health?.broker_status === "OFFLINE" ? "Demo Mode"
+                      : wsConnected ? "WS Only" : "Disconnected",
                   },
                 ] as const).map(({ icon: Ic, label, ok, text }) => (
                   <div key={label} className="flex items-center justify-between text-[11px]">

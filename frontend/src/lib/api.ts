@@ -345,6 +345,9 @@ export interface HealthResponse {
   feed_last_data_age: number;
   active_sessions: number;
   broker_online: boolean;
+  broker_status: string;
+  broker_attempts: number;
+  broker_error: string;
   risk_per_trade: string;
   portfolio_risk_limit: string;
   min_signal_score: number;
