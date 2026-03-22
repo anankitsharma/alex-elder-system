@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     max_portfolio_risk_pct: float = 6.0
     min_signal_score: int = 65
     paper_starting_capital: float = 100000.0  # Default equity for PAPER mode
-    paper_slippage_pct: float = 0.1  # Simulated slippage for paper trading (%)
+    paper_slippage_pct: float = 0.001  # Simulated slippage for paper trading (0.001 = 0.1%)
 
     # Regime detection
     adx_filter_enabled: bool = True      # Enable ADX-based regime filter

@@ -19,7 +19,17 @@ class AngelClient:
         self._refresh_token: str | None = None
 
     def _generate_totp(self) -> str:
-        return pyotp.TOTP(settings.angel_totp_secret).now()
+        """Generate a fresh TOTP code from the secret.
+
+        Auto-pads the Base32 secret if needed — Angel One's TOTP secrets
+        are sometimes provided without RFC 4648 padding ('=' suffix).
+        """
+        secret = settings.angel_totp_secret.strip()
+        # Auto-pad Base32 to 8-character boundary
+        pad = len(secret) % 8
+        if pad:
+            secret += "=" * (8 - pad)
+        return pyotp.TOTP(secret).now()
 
     def login_trading(self) -> dict:
         """Login with the trading API key. Used for order placement and account info."""
@@ -71,13 +81,20 @@ class AngelClient:
         return data
 
     def login_all(self) -> bool:
-        """Login to all three API sessions. Returns True if all succeed."""
+        """Login to all three API sessions. Returns True if all succeed.
+
+        Adds a 2-second delay between logins to avoid TOTP reuse within
+        the same 30-second window (Angel One may reject duplicate TOTPs).
+        """
+        import time
         results = []
-        for name, login_fn in [
+        for i, (name, login_fn) in enumerate([
             ("trading", self.login_trading),
             ("historical", self.login_historical),
             ("feed", self.login_feed),
-        ]:
+        ]):
+            if i > 0:
+                time.sleep(2)  # Wait for fresh TOTP window
             try:
                 result = login_fn()
                 results.append(result.get("status", False))
@@ -85,6 +102,11 @@ class AngelClient:
                 logger.error("{} login exception: {}", name, e)
                 results.append(False)
         return all(results)
+
+    def refresh_session(self):
+        """Re-authenticate all sessions (e.g., after token expiry)."""
+        logger.info("Refreshing broker sessions...")
+        return self.login_all()
 
     @property
     def trading(self) -> SmartConnect:
