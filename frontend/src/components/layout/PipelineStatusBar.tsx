@@ -38,6 +38,81 @@ const WS_STATE_COLOR: Record<WsState, string> = {
   polling: "text-amber-500/70",
 };
 
+const BROKER_STATUS_CONFIG: Record<string, { color: string; label: string; dot: string }> = {
+  CONNECTED: { color: "text-green-500/70", label: "Broker: ON", dot: "bg-green-500" },
+  CONNECTING: { color: "text-yellow-500/70", label: "Broker: Connecting...", dot: "bg-yellow-500 animate-pulse" },
+  RECONNECTING: { color: "text-yellow-500/70", label: "Broker: Retrying...", dot: "bg-yellow-500 animate-pulse" },
+  OFFLINE: { color: "text-red-500/70", label: "Broker: OFFLINE", dot: "bg-red-500" },
+  UNKNOWN: { color: "text-muted", label: "Broker: --", dot: "bg-gray-500" },
+};
+
+function BrokerStatus() {
+  const [status, setStatus] = useState("UNKNOWN");
+  const [error, setError] = useState("");
+  const [retrying, setRetrying] = useState(false);
+  const brokerConnected = useTradingStore((s) => s.brokerConnected);
+
+  // Poll broker status from heartbeat store updates
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const token = localStorage.getItem("elder_token");
+        const res = await fetch("http://localhost:8000/api/broker/status", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setStatus(data.status || "UNKNOWN");
+          setError(data.last_error || "");
+        }
+      } catch {
+        // API not reachable
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      const token = localStorage.getItem("elder_token");
+      await fetch("http://localhost:8000/api/broker/retry", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      setStatus("CONNECTING");
+    } catch {
+      // ignore
+    }
+    setTimeout(() => setRetrying(false), 5000);
+  };
+
+  const cfg = BROKER_STATUS_CONFIG[status] || BROKER_STATUS_CONFIG.UNKNOWN;
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={cn("w-1.5 h-1.5 rounded-full", cfg.dot)} />
+      <span className={cn("font-medium", cfg.color)} title={error || undefined}>
+        {cfg.label}
+      </span>
+      {(status === "OFFLINE" || status === "UNKNOWN") && (
+        <button
+          onClick={handleRetry}
+          disabled={retrying}
+          className={cn(
+            "px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors",
+            "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30",
+            retrying && "opacity-50 cursor-not-allowed",
+          )}
+          title={error ? `Error: ${error}` : "Retry broker connection"}
+        >
+          {retrying ? "Retrying..." : "Retry"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function PipelineStatusBar() {
   const dataFreshness = useTradingStore((s) => s.dataFreshness);
   const tradingMode = useTradingStore((s) => s.tradingMode);
@@ -131,10 +206,8 @@ export function PipelineStatusBar() {
         </span>
       )}
 
-      {/* Broker feed status */}
-      <span className={cn("text-muted", brokerConnected ? "text-green-500/70" : "text-red-500/70")}>
-        Feed: {brokerConnected ? "ON" : "OFF"}
-      </span>
+      {/* Broker connection status with retry button */}
+      <BrokerStatus />
 
       {/* Pipeline WS state */}
       <span className={cn("text-muted", WS_STATE_COLOR[wsState])}>

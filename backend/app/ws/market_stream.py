@@ -193,11 +193,22 @@ async def _heartbeat_loop():
                 feed_connected = False
                 feed_age = -1
 
+            # Include broker connection state for frontend status display
+            broker_state = {}
+            try:
+                from fastapi import FastAPI as _FA
+                import app.main as _main_mod
+                broker_state = getattr(_main_mod.app.state, "broker_state", {})
+            except Exception:
+                pass
+
             msg = json.dumps({
                 "type": "heartbeat",
                 "ts": now,
                 "feed_connected": feed_connected,
                 "feed_last_data_age": round(feed_age, 1),
+                "broker_status": broker_state.get("status", "UNKNOWN"),
+                "broker_error": broker_state.get("last_error", ""),
             })
             disconnected = []
             for ws in _pipeline_clients:

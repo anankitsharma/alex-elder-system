@@ -104,77 +104,89 @@ async def lifespan(app: FastAPI):
     # Wire pipeline manager broadcast
     pipeline_manager.set_broadcast(broadcast_pipeline_event)
 
-    # Login to Angel One APIs (non-blocking — run in thread pool)
-    loop = asyncio.get_event_loop()
-    try:
-        success = await asyncio.wait_for(
-            loop.run_in_executor(_executor, angel.login_all),
-            timeout=30,
-        )
-        if success:
-            logger.info("All Angel One API sessions active")
-            market_feed.add_callback(on_tick_received)
-            # Start heartbeat/tick processor loop (handles pipeline routing + heartbeats)
-            _ensure_heartbeat()
-            # Start WebSocket feed in background thread (connect() is blocking)
-            import threading
-            feed_thread = threading.Thread(target=market_feed.connect, daemon=True)
-            feed_thread.start()
-            logger.info("Market feed WebSocket starting in background thread")
+    # ── ALWAYS start heartbeat + pipeline (broker-independent) ──
+    # These work with demo data even when broker is offline
+    market_feed.add_callback(on_tick_received)
+    _ensure_heartbeat()
 
-            # Auto-start all tracked instruments with rate limiting
-            async def _auto_start_pipeline():
-                await asyncio.sleep(5)  # Wait for feed to connect
-                try:
-                    from app.broker.instruments import download_scrip_master, lookup_token
-                    from app.config import TRACKED_INSTRUMENTS
-                    scrip_df = await download_scrip_master()
+    # ── Broker connection (background, with retry) ──
+    # Broker login is attempted in the background. If it fails, the system
+    # runs in demo/offline mode. Pipelines start regardless.
+    _broker_state = {"status": "CONNECTING", "attempts": 0, "last_error": ""}
 
-                    tokens_by_exchange: dict[str, list[str]] = {}
-                    started = 0
-
-                    for sym, exch in TRACKED_INSTRUMENTS:
-                        for attempt in range(3):  # Up to 3 attempts
-                            try:
-                                await pipeline_manager.start_tracking(sym, exch)
-                                token = lookup_token(scrip_df, sym, exch)
-                                if token:
-                                    tokens_by_exchange.setdefault(exch, []).append(token)
-                                started += 1
-                                break
-                            except Exception as e:
-                                delay = 10 * (attempt + 1)  # 10s, 20s, 30s
-                                if attempt < 2:
-                                    logger.warning("Auto-start {}:{} attempt {} failed (retry in {}s): {}", sym, exch, attempt+1, delay, e)
-                                    await asyncio.sleep(delay)
-                                else:
-                                    logger.error("Auto-start {}:{} FAILED after 3 attempts: {}", sym, exch, e)
-                        await asyncio.sleep(5)  # Rate limit between instruments
-
-                    # Batch subscribe per exchange on feed
-                    for exch, tokens in tokens_by_exchange.items():
-                        if tokens and market_feed.is_connected:
-                            market_feed.subscribe(tokens, exch)
-                            logger.info("Feed subscribed {} tokens on {}", len(tokens), exch)
-
-                    logger.info("Auto-started {}/{} pipelines", started, len(TRACKED_INSTRUMENTS))
-
-                    # Telegram notification
+    async def _connect_broker():
+        """Attempt broker login with exponential backoff. Non-blocking."""
+        import threading
+        loop = asyncio.get_event_loop()
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            _broker_state["attempts"] = attempt
+            _broker_state["status"] = "CONNECTING"
+            try:
+                success = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, angel.login_all),
+                    timeout=30,
+                )
+                if success:
+                    _broker_state["status"] = "CONNECTED"
+                    _broker_state["last_error"] = ""
+                    logger.info("Broker connected (attempt {})", attempt)
+                    # Start live feed
+                    feed_thread = threading.Thread(target=market_feed.connect, daemon=True)
+                    feed_thread.start()
+                    logger.info("Market feed WebSocket starting")
+                    # Subscribe tracked instruments to feed
+                    await asyncio.sleep(3)
                     try:
-                        from app.notifications.telegram import notify_feed_status
-                        await notify_feed_status(True, f"{started} instruments")
+                        from app.broker.instruments import download_scrip_master, lookup_token
+                        scrip_df = await download_scrip_master()
+                        for sym, exch in TRACKED_INSTRUMENTS:
+                            token = lookup_token(scrip_df, sym, exch)
+                            if token:
+                                market_feed.subscribe([token], exch)
                     except Exception:
                         pass
-                except Exception as e:
-                    logger.warning("Auto pipeline start failed: {}", e)
+                    return  # Success — done
+                else:
+                    _broker_state["last_error"] = "Login returned False"
+            except asyncio.TimeoutError:
+                _broker_state["last_error"] = "Connection timeout (30s)"
+            except Exception as e:
+                _broker_state["last_error"] = str(e)
 
-            asyncio.create_task(_auto_start_pipeline())
-        else:
-            logger.warning("Some Angel One logins failed — running in offline mode")
-    except asyncio.TimeoutError:
-        logger.warning("Angel One login timed out (30s) — running in offline mode")
-    except Exception as e:
-        logger.error("Angel One login error: {} — running in offline mode", e)
+            _broker_state["status"] = "RECONNECTING"
+            delay = min(10 * (2 ** (attempt - 1)), 120)  # 10s, 20s, 40s, 80s, 120s
+            logger.warning(
+                "Broker connect attempt {}/{} failed: {} — retrying in {}s",
+                attempt, max_attempts, _broker_state["last_error"], delay,
+            )
+            await asyncio.sleep(delay)
+
+        _broker_state["status"] = "OFFLINE"
+        logger.warning("Broker OFFLINE after {} attempts — running in demo mode", max_attempts)
+
+    # ── Auto-start all tracked instruments (always, regardless of broker) ──
+    async def _auto_start_pipeline():
+        """Start all tracked instruments. Uses demo data if broker is offline."""
+        await asyncio.sleep(2)  # Brief wait for DB init
+        from app.config import TRACKED_INSTRUMENTS
+        started = 0
+        for sym, exch in TRACKED_INSTRUMENTS:
+            try:
+                await pipeline_manager.start_tracking(sym, exch)
+                started += 1
+            except Exception as e:
+                logger.warning("Pipeline start failed for {}:{}: {}", sym, exch, e)
+            await asyncio.sleep(1)  # Rate limit
+        logger.info("Auto-started {}/{} pipelines (broker: {})",
+                    started, len(TRACKED_INSTRUMENTS), _broker_state["status"])
+
+    # Launch both in parallel — pipelines start immediately, broker retries in background
+    asyncio.create_task(_auto_start_pipeline())
+    asyncio.create_task(_connect_broker())
+
+    # Expose broker state for API/frontend
+    app.state.broker_state = _broker_state
 
     logger.info("Elder Trading System ready at http://localhost:8000")
 
@@ -256,14 +268,78 @@ async def health():
     except Exception:
         active_sessions = 0
 
+    # Broker connection state
+    broker = getattr(app.state, "broker_state", {})
+
     return {
         "status": "ok",
         "trading_mode": settings.trading_mode,
         "feed_connected": feed_connected,
         "feed_last_data_age": feed_age,
         "active_sessions": active_sessions,
-        "broker_online": feed_connected or feed_age >= 0,
+        "broker_status": broker.get("status", "UNKNOWN"),
+        "broker_attempts": broker.get("attempts", 0),
+        "broker_error": broker.get("last_error", ""),
+        "broker_online": broker.get("status") == "CONNECTED",
         "risk_per_trade": f"{settings.max_risk_per_trade_pct}%",
         "portfolio_risk_limit": f"{settings.max_portfolio_risk_pct}%",
         "min_signal_score": settings.min_signal_score,
     }
+
+
+@app.get("/api/broker/status")
+async def broker_status():
+    """Broker connection status — shows state, attempts, errors."""
+    broker = getattr(app.state, "broker_state", {})
+    try:
+        feed_connected = market_feed.is_connected
+        feed_age = round(market_feed.last_data_age, 1)
+    except Exception:
+        feed_connected = False
+        feed_age = -1
+    return {
+        "status": broker.get("status", "UNKNOWN"),
+        "attempts": broker.get("attempts", 0),
+        "last_error": broker.get("last_error", ""),
+        "feed_connected": feed_connected,
+        "feed_last_data_age": feed_age,
+    }
+
+
+@app.post("/api/broker/retry")
+async def broker_retry():
+    """Manually trigger broker reconnection attempt."""
+    broker = getattr(app.state, "broker_state", {})
+    if broker.get("status") == "CONNECTED":
+        return {"status": "already_connected"}
+
+    broker["status"] = "CONNECTING"
+    broker["attempts"] = 0
+
+    # Re-run broker connection in background
+    import threading
+    loop = asyncio.get_event_loop()
+
+    async def _retry():
+        try:
+            success = await asyncio.wait_for(
+                loop.run_in_executor(_executor, angel.login_all),
+                timeout=30,
+            )
+            if success:
+                broker["status"] = "CONNECTED"
+                broker["last_error"] = ""
+                logger.info("Broker reconnected via manual retry")
+                # Start feed if not running
+                if not market_feed.is_connected:
+                    feed_thread = threading.Thread(target=market_feed.connect, daemon=True)
+                    feed_thread.start()
+                return
+        except Exception as e:
+            broker["last_error"] = str(e)
+
+        broker["status"] = "OFFLINE"
+        logger.warning("Manual broker retry failed: {}", broker["last_error"])
+
+    asyncio.create_task(_retry())
+    return {"status": "retrying", "message": "Broker reconnection started in background"}
