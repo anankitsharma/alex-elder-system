@@ -152,6 +152,167 @@ function Select({
   );
 }
 
+/* ── 3-state asset switcher: INACTIVE → PAPER → LIVE ── */
+
+type AssetState = "INACTIVE" | "PAPER" | "LIVE";
+
+const STATE_CONFIG: Record<AssetState, { label: string; bg: string; text: string; dot: string }> = {
+  INACTIVE: { label: "Inactive", bg: "bg-zinc-800", text: "text-zinc-400", dot: "bg-zinc-500" },
+  PAPER:    { label: "Paper",    bg: "bg-amber-500/20", text: "text-amber-400", dot: "bg-amber-500" },
+  LIVE:     { label: "Live",     bg: "bg-red-500/20", text: "text-red-400", dot: "bg-red-500" },
+};
+
+const STATES: AssetState[] = ["INACTIVE", "PAPER", "LIVE"];
+
+function ThreeStateSwitcher({
+  state,
+  onChange,
+  liveDisabled = false,
+}: {
+  state: AssetState;
+  onChange: (s: AssetState) => void;
+  liveDisabled?: boolean;
+}) {
+  return (
+    <div className="flex items-center rounded-md border border-border overflow-hidden">
+      {STATES.map((s) => {
+        const active = state === s;
+        const disabled = s === "LIVE" && liveDisabled;
+        const cfg = STATE_CONFIG[s];
+        return (
+          <button
+            key={s}
+            onClick={() => !disabled && onChange(s)}
+            disabled={disabled}
+            title={disabled ? "LIVE not approved — request from admin" : `Switch to ${s}`}
+            className={cn(
+              "px-2.5 py-1 text-[10px] font-semibold transition-all border-r border-border last:border-r-0",
+              active ? `${cfg.bg} ${cfg.text}` : "bg-transparent text-muted/50 hover:text-muted",
+              disabled && "opacity-30 cursor-not-allowed",
+            )}
+          >
+            {active && <span className={cn("inline-block w-1.5 h-1.5 rounded-full mr-1.5", cfg.dot)} />}
+            {cfg.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function WatchlistRow({
+  item,
+  onRemove,
+}: {
+  item: WatchlistEntry;
+  onRemove: () => void;
+}) {
+  const [state, setState] = useState<AssetState>("INACTIVE");
+  const [loading, setLoading] = useState(false);
+
+  // Load current state on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        // Check if pipeline is active for this symbol
+        const res = await fetch(
+          `http://localhost:8000/api/strategy/pipeline/command-center`,
+          { headers: { Authorization: `Bearer ${localStorage.getItem("elder_token") || ""}` } },
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const asset = data.assets?.find(
+            (a: { symbol: string; exchange: string }) =>
+              a.symbol === item.symbol && a.exchange === item.exchange
+          );
+          if (asset) {
+            setState(asset.trading_mode === "LIVE" ? "LIVE" : "PAPER");
+          } else {
+            setState("INACTIVE");
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [item.symbol, item.exchange]);
+
+  const handleStateChange = async (newState: AssetState) => {
+    setLoading(true);
+    const token = localStorage.getItem("elder_token") || "";
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+    try {
+      if (newState === "INACTIVE" && state !== "INACTIVE") {
+        // Stop pipeline
+        await fetch("http://localhost:8000/api/strategy/pipeline/stop", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ symbol: item.symbol, exchange: item.exchange }),
+        });
+      } else if (newState !== "INACTIVE" && state === "INACTIVE") {
+        // Start pipeline
+        await fetch("http://localhost:8000/api/strategy/pipeline/start", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ symbol: item.symbol, exchange: item.exchange }),
+        });
+      }
+
+      if (newState === "PAPER" || newState === "LIVE") {
+        // Set trading mode
+        await fetch(
+          `http://localhost:8000/api/strategy/pipeline/asset-settings/${item.symbol}`,
+          {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({
+              exchange: item.exchange,
+              trading_mode: newState,
+              user_id: 1,
+            }),
+          },
+        );
+      }
+
+      setState(newState);
+    } catch {
+      // revert on error
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-surface-2/60 transition-colors group">
+      <div className="flex items-center gap-2.5">
+        <span className={cn("w-1.5 h-1.5 rounded-full", STATE_CONFIG[state].dot)} />
+        <span className="text-[11px] font-medium text-foreground">{item.symbol}</span>
+        <span className="text-[9px] px-1.5 py-0.5 rounded bg-surface-2 border border-border text-muted font-mono">
+          {item.exchange}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        {loading ? (
+          <Loader2 className="w-3 h-3 text-muted animate-spin" />
+        ) : (
+          <ThreeStateSwitcher
+            state={state}
+            onChange={handleStateChange}
+            liveDisabled={false}
+          />
+        )}
+        <button
+          onClick={onRemove}
+          className="p-1 rounded text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+          title="Remove from watchlist"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── main component ────────────────────────────────── */
 
 export default function SettingsView() {
@@ -423,24 +584,11 @@ export default function SettingsView() {
                 </div>
               ) : (
                 settings.watchlist.map((item) => (
-                  <div
+                  <WatchlistRow
                     key={`${item.symbol}-${item.exchange}`}
-                    className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-surface-2/60 transition-colors group"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-[11px] font-medium text-foreground">{item.symbol}</span>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-surface-2 border border-border text-muted font-mono">
-                        {item.exchange}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => handleRemove(item.symbol, item.exchange)}
-                      className="p-1 rounded text-muted hover:text-red hover:bg-red/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title="Remove"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+                    item={item}
+                    onRemove={() => handleRemove(item.symbol, item.exchange)}
+                  />
                 ))
               )}
             </div>
