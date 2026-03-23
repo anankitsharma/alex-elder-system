@@ -1014,12 +1014,13 @@ class AssetSession:
             wave = self._alert_mgr.check_wave_confirmed(raw_wave)
 
             # ── ADX regime filter: reduce confidence in sideways markets ──
+            # Skip filter if ADX is not available or 0 (insufficient data)
             adx_value = None
             if settings.adx_filter_enabled:
                 screen1_tf = self.screen_timeframes.get("1", "1w")
                 adx_list = self.indicators.get(screen1_tf, {}).get("adx", [])
                 adx_value = last_non_null(adx_list)
-                if adx_value is not None:
+                if adx_value and adx_value > 0:  # Only filter when ADX is actually computed
                     if adx_value < settings.adx_weak_trend:
                         # Sideways market — suppress signal
                         confidence = 0
