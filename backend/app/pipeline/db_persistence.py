@@ -443,6 +443,21 @@ async def update_position_stop(
         await session.commit()
 
 
+async def update_position_prices(session: AsyncSession, symbol: str, current_price: float):
+    """Mark-to-market: update current_price and unrealized_pnl for all open positions of a symbol."""
+    stmt = select(Position).where(
+        and_(Position.symbol == symbol, Position.status == "OPEN")
+    )
+    result = await session.execute(stmt)
+    for pos in result.scalars().all():
+        pos.current_price = current_price
+        if pos.direction == "LONG":
+            pos.unrealized_pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+        else:
+            pos.unrealized_pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+    await session.commit()
+
+
 async def load_month_trades(
     session: AsyncSession,
     month: str,

@@ -748,6 +748,14 @@ class AssetSession:
                     if excursion > (pos.mfe or 0):
                         pos.mfe = round(excursion, 2)
 
+                    # Update current_price for mark-to-market (real-time P&L)
+                    pos.current_price = current_price
+                    # Compute unrealized P&L
+                    if pos.direction == "LONG":
+                        pos.unrealized_pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+                    else:
+                        pos.unrealized_pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+
                     exit_reason = None
                     # Check stop loss
                     if pos.stop_price and pos.stop_price > 0:
@@ -839,7 +847,19 @@ class AssetSession:
                                 )
                             except Exception:
                                 pass
-                await session.commit()  # Persist MAE/MFE updates
+                # Broadcast portfolio update for real-time dashboard
+                total_unrealized = sum(
+                    (current_price - p.entry_price) * p.quantity if p.direction == "LONG"
+                    else (p.entry_price - current_price) * p.quantity
+                    for p in positions
+                )
+                await self._broadcast_event("portfolio_update", {
+                    "symbol": self.symbol,
+                    "unrealized_pnl": round(total_unrealized, 2),
+                    "position_count": len(positions),
+                })
+
+                await session.commit()  # Persist MAE/MFE + mark-to-market updates
         except Exception as e:
             logger.debug("Stop/target check failed for {}: {}", self.symbol, e)
 

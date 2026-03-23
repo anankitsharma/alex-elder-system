@@ -97,7 +97,7 @@ async def get_profile():
 async def get_funds():
     """Get available funds and margins. In PAPER mode, reads from DB equity."""
     if settings.trading_mode == "PAPER":
-        # Get real equity from portfolio_risk DB (not hardcoded)
+        # Get real equity from portfolio_risk DB (includes realized P&L)
         from app.pipeline import db_persistence as db
         try:
             async with async_session() as session:
@@ -105,13 +105,9 @@ async def get_funds():
         except Exception:
             current_equity = settings.paper_starting_capital
 
-        # Calculate utilized margin from in-memory paper positions
-        utilized = sum(
-            abs(int(p.get("netqty", "0"))) * float(p.get("ltp", "0"))
-            for p in _paper_positions
-        )
-
-        # Also check DB positions for pipeline-executed trades
+        # Calculate utilized margin and unrealized P&L from DB positions
+        utilized = 0.0
+        unrealized_pnl = 0.0
         try:
             from app.models.trade import Position
             from sqlalchemy import select
@@ -120,13 +116,24 @@ async def get_funds():
                     select(Position).where(Position.status == "OPEN")
                 )
                 for pos in result.scalars().all():
-                    utilized += abs(pos.quantity * (pos.current_price or pos.entry_price))
+                    # Margin tied up = entry_price * quantity
+                    utilized += abs(pos.quantity * pos.entry_price)
+                    # Unrealized P&L from mark-to-market (updated by pipeline)
+                    unrealized_pnl += pos.unrealized_pnl or 0.0
         except Exception:
             pass
 
-        pnl = sum(float(p.get("pnl", "0")) for p in _paper_positions)
-        available = round(current_equity - utilized, 2)
-        net = round(current_equity + pnl, 2)
+        # Also include in-memory paper positions (manual trades via /order)
+        utilized += sum(
+            abs(int(p.get("netqty", "0"))) * float(p.get("ltp", "0"))
+            for p in _paper_positions
+        )
+        realized_pnl_inmem = sum(float(p.get("pnl", "0")) for p in _paper_positions)
+
+        # Net = equity (includes realized) + unrealized from open positions
+        net = round(current_equity + unrealized_pnl + realized_pnl_inmem, 2)
+        utilized = round(utilized, 2)
+        available = round(net - utilized, 2)
 
         return {
             "status": True,
@@ -135,8 +142,8 @@ async def get_funds():
                 "utilisedmargin": f"{utilized:.2f}",
                 "availableintradaypayin": f"{available:.2f}",
                 "collateral": "0.00",
-                "m2mrealized": f"{pnl:.2f}",
-                "m2munrealized": "0.00",
+                "m2mrealized": f"{realized_pnl_inmem:.2f}",
+                "m2munrealized": f"{unrealized_pnl:.2f}",
                 "net": f"{net:.2f}",
             },
         }
