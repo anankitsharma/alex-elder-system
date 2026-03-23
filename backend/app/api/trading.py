@@ -95,19 +95,39 @@ async def get_profile():
 
 @router.get("/funds")
 async def get_funds():
-    """Get available funds and margins."""
+    """Get available funds and margins. In PAPER mode, reads from DB equity."""
     if settings.trading_mode == "PAPER":
-        # Calculate utilized margin from open positions
+        # Get real equity from portfolio_risk DB (not hardcoded)
+        from app.pipeline import db_persistence as db
+        try:
+            async with async_session() as session:
+                current_equity = await db.get_current_equity(session, user_id=1)
+        except Exception:
+            current_equity = settings.paper_starting_capital
+
+        # Calculate utilized margin from in-memory paper positions
         utilized = sum(
             abs(int(p.get("netqty", "0"))) * float(p.get("ltp", "0"))
             for p in _paper_positions
         )
-        available = _paper_capital["starting"] - utilized
-        _paper_capital["available"] = round(available, 2)
-        _paper_capital["utilized"] = round(utilized, 2)
-        net = round(_paper_capital["starting"] + sum(
-            float(p.get("pnl", "0")) for p in _paper_positions
-        ), 2)
+
+        # Also check DB positions for pipeline-executed trades
+        try:
+            from app.models.trade import Position
+            from sqlalchemy import select
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Position).where(Position.status == "OPEN")
+                )
+                for pos in result.scalars().all():
+                    utilized += abs(pos.quantity * (pos.current_price or pos.entry_price))
+        except Exception:
+            pass
+
+        pnl = sum(float(p.get("pnl", "0")) for p in _paper_positions)
+        available = round(current_equity - utilized, 2)
+        net = round(current_equity + pnl, 2)
+
         return {
             "status": True,
             "data": {
@@ -115,7 +135,7 @@ async def get_funds():
                 "utilisedmargin": f"{utilized:.2f}",
                 "availableintradaypayin": f"{available:.2f}",
                 "collateral": "0.00",
-                "m2mrealized": "0.00",
+                "m2mrealized": f"{pnl:.2f}",
                 "m2munrealized": "0.00",
                 "net": f"{net:.2f}",
             },
@@ -266,9 +286,9 @@ async def reset_paper_account():
         raise HTTPException(status_code=400, detail="Only available in PAPER mode")
     _paper_orders.clear()
     _paper_positions.clear()
-    _paper_capital["available"] = _paper_capital["starting"]
+    _paper_capital["available"] = settings.paper_starting_capital
     _paper_capital["utilized"] = 0.0
-    return {"status": True, "message": "Paper account reset to 100,000"}
+    return {"status": True, "message": f"Paper account reset to {settings.paper_starting_capital:,.0f}"}
 
 
 @router.post("/session/refresh")
