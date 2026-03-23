@@ -1148,6 +1148,7 @@ class AssetSession:
         grade = analysis.get("grade", "D")
 
         # Position-aware dedup: suppress same-direction signal if already in position
+        # Also check total portfolio margin — reject if already over-leveraged
         direction = "LONG" if action == "BUY" else "SHORT"
         try:
             async with async_session() as session:
@@ -1159,8 +1160,25 @@ class AssetSession:
                             direction, self.symbol, pos.id,
                         )
                         return
+
+                # Total portfolio margin check — reject if already using > 80% of equity
+                from app.models.trade import Position as PositionModel
+                from sqlalchemy import select as _sel
+                all_open = await session.execute(
+                    _sel(PositionModel).where(PositionModel.status == "OPEN")
+                )
+                total_notional = sum(
+                    abs(p.quantity * p.entry_price) for p in all_open.scalars().all()
+                )
+                equity = await db.get_current_equity(session, user_id=self.user_id or 1)
+                if equity > 0 and total_notional > equity * 0.8:
+                    logger.info(
+                        "Signal rejected: total margin {:.0f} > 80% of equity {:.0f}",
+                        total_notional, equity,
+                    )
+                    return
         except Exception:
-            pass  # If position check fails, proceed anyway
+            pass  # If checks fail, proceed anyway
 
         # Revenge trading prevention: block after N consecutive losses
         try:
@@ -1265,6 +1283,19 @@ class AssetSession:
                 if not sizing.get("is_valid", False):
                     logger.info("Signal rejected by position sizer: {}", sizing.get("reason"))
                     return
+
+                # Margin cap: notional value must not exceed 50% of equity per position
+                # This prevents tiny risk-per-share from creating oversized notional positions
+                max_notional = account_equity * 0.5  # 50% of equity per trade
+                notional = sizing["shares"] * entry_price
+                if notional > max_notional and sizing["shares"] > 1:
+                    capped_shares = max(1, int(max_notional / entry_price))
+                    logger.info(
+                        "Margin cap {}: {} → {} shares (notional {:.0f} > {:.0f} max)",
+                        self.symbol, sizing["shares"], capped_shares, notional, max_notional,
+                    )
+                    sizing["shares"] = capped_shares
+                    sizing["risk_amount"] = round(capped_shares * abs(entry_price - stop_price), 2)
 
                 # Apply drawdown scaling — reduce position as portfolio heat increases
                 scale = self._circuit_breaker.get_position_scale()
