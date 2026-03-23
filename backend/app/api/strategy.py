@@ -480,7 +480,13 @@ async def get_performance():
         open_positions = result3.scalars().all()
 
     # Calculate metrics
-    starting_equity = 100000
+    # Read starting equity from DB (not hardcoded)
+    try:
+        from app.pipeline import db_persistence as _db
+        async with async_session() as _eq_session:
+            starting_equity = await _db.get_month_start_equity(_eq_session, user_id=1)
+    except Exception:
+        starting_equity = settings.paper_starting_capital
     equity = starting_equity
     equity_curve = [{"date": "start", "equity": equity}]
     wins = 0

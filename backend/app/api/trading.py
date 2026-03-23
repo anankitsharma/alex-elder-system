@@ -151,17 +151,77 @@ async def get_holdings():
 
 @router.get("/positions")
 async def get_positions():
-    """Get current positions."""
+    """Get current positions — merges in-memory paper + DB pipeline positions."""
     if settings.trading_mode == "PAPER":
-        return {"data": _paper_positions}
+        # Merge in-memory paper positions with DB pipeline positions
+        combined = list(_paper_positions)
+        try:
+            from app.models.trade import Position
+            from sqlalchemy import select
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Position).where(Position.status == "OPEN").order_by(Position.opened_at.desc())
+                )
+                for pos in result.scalars().all():
+                    # Calculate unrealized P&L
+                    if pos.direction == "LONG":
+                        pnl = ((pos.current_price or pos.entry_price) - pos.entry_price) * pos.quantity
+                    else:
+                        pnl = (pos.entry_price - (pos.current_price or pos.entry_price)) * pos.quantity
+                    combined.append({
+                        "tradingsymbol": pos.symbol,
+                        "symboltoken": "",
+                        "exchange": "",
+                        "transactiontype": "BUY" if pos.direction == "LONG" else "SELL",
+                        "netqty": str(pos.quantity if pos.direction == "LONG" else -pos.quantity),
+                        "quantity": str(pos.quantity),
+                        "buyavgprice": f"{pos.entry_price:.2f}" if pos.direction == "LONG" else "0",
+                        "sellavgprice": f"{pos.entry_price:.2f}" if pos.direction == "SHORT" else "0",
+                        "ltp": f"{pos.current_price or pos.entry_price:.2f}",
+                        "pnl": f"{pnl:.2f}",
+                        "stoploss": f"{pos.stop_price:.2f}" if pos.stop_price else "0",
+                        "target": f"{pos.target_price:.2f}" if pos.target_price else "0",
+                        "status": "OPEN",
+                        "mode": pos.mode,
+                        "source": "pipeline",
+                    })
+        except Exception:
+            pass
+        return {"data": combined}
     return _safe_broker_call(lambda: angel.get_positions(), {"data": []})
 
 
 @router.get("/orders")
 async def get_order_book():
-    """Get order book."""
+    """Get order book — merges in-memory paper + DB pipeline orders."""
     if settings.trading_mode == "PAPER":
-        return {"data": _paper_orders}
+        combined = list(_paper_orders)
+        try:
+            from app.models.trade import Order
+            from sqlalchemy import select
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Order).order_by(Order.created_at.desc()).limit(50)
+                )
+                for o in result.scalars().all():
+                    combined.append({
+                        "orderid": o.order_id or f"DB-{o.id}",
+                        "tradingsymbol": o.symbol,
+                        "transactiontype": o.direction,
+                        "ordertype": o.order_type,
+                        "quantity": str(o.quantity),
+                        "price": f"{o.price:.2f}" if o.price else "0",
+                        "triggerprice": "0",
+                        "status": o.status.lower() if o.status else "complete",
+                        "filledshares": str(o.filled_quantity or 0),
+                        "averageprice": f"{o.filled_price:.2f}" if o.filled_price else "0",
+                        "mode": o.mode,
+                        "source": "pipeline",
+                        "text": f"{o.created_at.strftime('%H:%M:%S')}" if o.created_at else "",
+                    })
+        except Exception:
+            pass
+        return {"data": combined}
     return _safe_broker_call(lambda: angel.get_order_book(), {"data": []})
 
 
