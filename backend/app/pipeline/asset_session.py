@@ -1362,14 +1362,15 @@ class AssetSession:
         if risk_pct > 10:
             return False, f"Risk per share {risk_pct:.1f}% exceeds 10% limit"
 
-        # 5. Max position value check (hard cap at 50 lakhs for safety)
+        # 5. Max position value check (hard cap — 10x account equity or 1 crore)
         position_value = quantity * price
-        if position_value > 5_000_000:  # 50 lakhs
-            return False, f"Position value ₹{position_value:,.0f} exceeds ₹50L hard cap"
+        max_value = 10_000_000  # 1 crore hard cap
+        if position_value > max_value:
+            return False, f"Position value {position_value:,.0f} exceeds {max_value:,.0f} hard cap"
 
-        # 6. Max quantity check (hard cap at 10,000 shares/lots)
-        if quantity > 10_000:
-            return False, f"Quantity {quantity} exceeds 10,000 hard cap"
+        # 6. Max quantity check (hard cap at 50,000 units for futures)
+        if quantity > 50_000:
+            return False, f"Quantity {quantity} exceeds 50,000 hard cap"
 
         return True, "OK"
 
