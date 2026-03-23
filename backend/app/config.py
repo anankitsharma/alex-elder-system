@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     min_signal_score: int = 65
     paper_starting_capital: float = 100000.0  # Default equity for PAPER mode
     paper_slippage_pct: float = 0.001  # Simulated slippage for paper trading (0.001 = 0.1%)
+    rr_target_multiplier: float = 2.0  # Risk:Reward ratio for target (2.0 = 1:2)
+    limit_order_buffer_pct: float = 0.005  # Limit order buffer (0.005 = 0.5%)
+    min_stop_distance_pct: float = 0.01  # Min stop distance (0.01 = 1% from entry)
 
     # Regime detection
     adx_filter_enabled: bool = True      # Enable ADX-based regime filter

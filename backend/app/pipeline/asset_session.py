@@ -757,18 +757,29 @@ class AssetSession:
                         pos.unrealized_pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
 
                     exit_reason = None
-                    # Check stop loss
+
+                    # Get running bar high/low for intrabar stop checking
+                    # This catches stops hit during the bar even if price recovers by close
+                    bar_low = current_price
+                    bar_high = current_price
+                    for tf, builder in self.candle_builders.items():
+                        bar = builder.running_bar
+                        if bar:
+                            bar_low = min(bar_low, bar.get("low", current_price))
+                            bar_high = max(bar_high, bar.get("high", current_price))
+
+                    # Check stop loss (uses bar low for LONG, bar high for SHORT)
                     if pos.stop_price and pos.stop_price > 0:
-                        if pos.direction == "LONG" and current_price <= pos.stop_price:
+                        if pos.direction == "LONG" and bar_low <= pos.stop_price:
                             exit_reason = "STOP_LOSS"
-                        elif pos.direction == "SHORT" and current_price >= pos.stop_price:
+                        elif pos.direction == "SHORT" and bar_high >= pos.stop_price:
                             exit_reason = "STOP_LOSS"
 
-                    # Check target price (2:1 R:R)
+                    # Check target price (uses bar high for LONG, bar low for SHORT)
                     if not exit_reason and pos.target_price and pos.target_price > 0:
-                        if pos.direction == "LONG" and current_price >= pos.target_price:
+                        if pos.direction == "LONG" and bar_high >= pos.target_price:
                             exit_reason = "TARGET"
-                        elif pos.direction == "SHORT" and current_price <= pos.target_price:
+                        elif pos.direction == "SHORT" and bar_low <= pos.target_price:
                             exit_reason = "TARGET"
 
                     if exit_reason:
@@ -1460,20 +1471,29 @@ class AssetSession:
             return
 
         # SEBI circular: Market orders prohibited for algorithmic trading from April 1, 2026.
-        # Use LIMIT orders with a small buffer to ensure fills while remaining compliant.
-        # BUY: limit price 0.2% above entry; SELL: limit price 0.2% below entry.
+        # Use LIMIT orders with configurable buffer to ensure fills.
+        buffer = settings.limit_order_buffer_pct  # 0.5% default
         if direction == "BUY":
-            limit_price = round(entry * 1.002, 2)
+            limit_price = round(entry * (1 + buffer), 2)
         else:
-            limit_price = round(entry * 0.998, 2)
+            limit_price = round(entry * (1 - buffer), 2)
 
-        # Calculate target price (2:1 R:R by default)
+        # Enforce minimum stop distance (prevent tiny risk-per-share causing huge positions)
         risk_per_share = abs(entry - stop) if stop > 0 else 0
-        rr_multiplier = getattr(settings, "rr_target_multiplier", 2.0)
+        min_risk = entry * settings.min_stop_distance_pct  # 1% of entry
+        if risk_per_share < min_risk and risk_per_share > 0:
+            if direction == "BUY":
+                stop = round(entry - min_risk, 2)
+            else:
+                stop = round(entry + min_risk, 2)
+            risk_per_share = min_risk
+            logger.info("Stop widened for {}: min distance {:.2f} applied", self.symbol, min_risk)
+        rr_multiplier = settings.rr_target_multiplier
+        # Target calculated from limit_price (actual expected fill), not theoretical entry
         if direction == "BUY":
-            target = entry + (risk_per_share * rr_multiplier) if risk_per_share > 0 else 0
+            target = round(limit_price + (risk_per_share * rr_multiplier), 2) if risk_per_share > 0 else 0
         else:
-            target = entry - (risk_per_share * rr_multiplier) if risk_per_share > 0 else 0
+            target = round(limit_price - (risk_per_share * rr_multiplier), 2) if risk_per_share > 0 else 0
 
         mode = self.effective_trading_mode  # Per-asset or global
 
@@ -1570,8 +1590,9 @@ class AssetSession:
                     "mode": mode,
                 })
 
-            # Clear exit dedup set — new position opened
-            self._exit_initiated.clear()
+            # Remove only this position's old exit dedup entry (not all)
+            # Don't clear() — other positions may have active exit flags
+            self._exit_initiated.discard(position.id if hasattr(position, 'id') else 0)
 
             logger.info(
                 "[{}] Auto-executed: {} {} x{} @ {:.2f} stop={:.2f} target={:.2f} order={}",
