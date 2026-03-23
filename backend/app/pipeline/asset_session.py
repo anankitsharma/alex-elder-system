@@ -324,7 +324,7 @@ class AssetSession:
         try:
             from datetime import date as _date
             async with async_session() as session:
-                month_start = await db.get_month_start_equity(session, user_id=self.user_id)
+                month_start = await db.get_month_start_equity(session, user_id=self.user_id or 1)
                 self._circuit_breaker.set_month_start_equity(month_start)
 
                 # Sync realized losses from this month's trades
@@ -799,7 +799,7 @@ class AssetSession:
 
                             # Update account equity + circuit breaker
                             try:
-                                await db.update_portfolio_equity(session, pnl, user_id=self.user_id)
+                                await db.update_portfolio_equity(session, pnl, user_id=self.user_id or 1)
                                 if pnl < 0:
                                     self._circuit_breaker.record_loss(abs(pnl))
                             except Exception:
@@ -1232,7 +1232,7 @@ class AssetSession:
 
                 # Get real account equity from DB
                 async with async_session() as session:
-                    account_equity = await db.get_current_equity(session, user_id=self.user_id)
+                    account_equity = await db.get_current_equity(session, user_id=self.user_id or 1)
 
                 # Position sizing with real equity
                 from app.risk.position_sizer import PositionSizer
