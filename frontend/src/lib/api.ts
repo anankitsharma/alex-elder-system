@@ -289,6 +289,14 @@ export interface CommandCenterAsset {
     level: number;
     direction: string | null;
     description: string;
+    s1_price: number | null;
+    s1_status: "aligned" | "waiting" | "neutral" | null;
+    s2_price: number | null;
+    s2_status: "aligned" | "possible" | "waiting" | null;
+    s3_price: number | null;
+    s3_status: "aligned" | "possible" | "waiting" | null;
+    stop_price: number | null;
+    ltp: number | null;
   } | null;
   contract: string | null;
   expiry_date: string | null;

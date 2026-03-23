@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import type { CommandCenterAsset } from "@/lib/api";
 import { toggleAssetMode, fetchCommandCenter } from "@/lib/api";
 import { useAuthStore } from "@/store/useAuthStore";
@@ -39,6 +39,27 @@ const LEVEL_BORDER: Record<number, string> = {
   2: "border-l-2 border-l-orange-500/60",
   3: "border-l-2 border-l-green-500 animate-pulse",
 };
+
+const SCREEN_STATUS_STYLES: Record<string, { color: string; icon: string }> = {
+  aligned: { color: "text-green-400", icon: "\u2713" },
+  possible: { color: "text-amber-400", icon: "\u2192" },
+  waiting: { color: "text-muted", icon: "\u25CB" },
+  neutral: { color: "text-muted", icon: "\u25CB" },
+};
+
+function formatInr(v: number | null | undefined): string {
+  if (v == null) return "\u2014";
+  return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function ScreenPriceTag({ label, price, status }: { label: string; price: number | null | undefined; status: string | null | undefined }) {
+  const s = SCREEN_STATUS_STYLES[status ?? "waiting"] ?? SCREEN_STATUS_STYLES.waiting;
+  return (
+    <span className={cn("font-mono", s.color)}>
+      {label} {"\u20B9"}{formatInr(price)} {s.icon}
+    </span>
+  );
+}
 
 function AlignmentDots({ alignment }: { alignment: CommandCenterAsset["alignment"] }) {
   if (!alignment) return <span className="text-muted">—</span>;
@@ -154,12 +175,15 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
             const actionColor = a.action === "BUY" ? "text-green-400" : a.action === "SELL" ? "text-red-400" : "text-muted";
             const level = a.alignment?.level ?? 0;
 
+            const hasScreenPrices = a.alignment && (a.alignment.s1_price != null || a.alignment.s2_price != null || a.alignment.s3_price != null);
+
             return (
+              <React.Fragment key={`${a.symbol}:${a.exchange}`}>
               <tr
-                key={`${a.symbol}:${a.exchange}`}
                 onClick={() => onSelectAsset(a.symbol, a.exchange)}
                 className={cn(
-                  "border-b border-border/50 hover:bg-surface-2 cursor-pointer transition-colors",
+                  hasScreenPrices ? "border-b border-border/20" : "border-b border-border/50",
+                  "hover:bg-surface-2 cursor-pointer transition-colors",
                   LEVEL_BORDER[level],
                   level === 3 && "bg-green-500/5",
                 )}
@@ -256,6 +280,30 @@ export default function CommandCenterGrid({ assets, onSelectAsset }: Props) {
                   {a.stop_price ? a.stop_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}
                 </td>
               </tr>
+              {/* Screen alignment price points */}
+              {hasScreenPrices && a.alignment && (
+                <tr
+                  onClick={() => onSelectAsset(a.symbol, a.exchange)}
+                  className="border-b border-border/50 hover:bg-surface-2 cursor-pointer"
+                >
+                  <td colSpan={13} className="px-2 py-0.5">
+                    <div className="flex items-center gap-3 text-[9px] pl-1">
+                      <ScreenPriceTag label="S1" price={a.alignment.s1_price} status={a.alignment.s1_status} />
+                      <span className="text-border">|</span>
+                      <ScreenPriceTag label="S2" price={a.alignment.s2_price} status={a.alignment.s2_status} />
+                      <span className="text-border">|</span>
+                      <ScreenPriceTag label="S3" price={a.alignment.s3_price} status={a.alignment.s3_status} />
+                      {a.alignment.stop_price != null && (
+                        <>
+                          <span className="text-border">|</span>
+                          <span className="font-mono text-red-400/70">Stop {"\u20B9"}{formatInr(a.alignment.stop_price)}</span>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )}
+              </React.Fragment>
             );
           })}
         </tbody>

@@ -1087,6 +1087,58 @@ class AssetSession:
                 3: f"FULL ALIGNMENT — {direction} ({grade})",
             }
 
+            # ── Compute price points for each screen ──
+            # Shows WHERE each screen aligned (or COULD align)
+            ltp = None
+            if not candles_2.empty:
+                ltp = float(candles_2.iloc[-1].get("close", 0))
+
+            # Screen 1 price: close when tide established
+            s1_price = None
+            s1_status = "neutral"
+            if s1_aligned:
+                s1_price = ltp  # Tide is aligned at current price level
+                s1_status = "aligned"
+            else:
+                s1_status = "waiting"
+                # Tide needs MACD-H slope to turn — show current MACD-H
+                last_macd_h = last_non_null(ind1.get("macd_histogram", []))
+                s1_price = last_macd_h  # Show MACD-H value instead of price
+
+            # Screen 2 price: wave alignment level
+            s2_price = None
+            s2_status = "waiting"
+            fi2 = clamped_fi2
+            if s2_aligned:
+                s2_price = ltp  # Wave aligned at current price
+                s2_status = "aligned"
+            elif s1_aligned:
+                s2_status = "possible"
+                # Show what's needed: FI2 needs to cross zero
+                # For BULLISH tide: need FI2 < 0 (pullback) then cross up
+                # For BEARISH tide: need FI2 > 0 (rally) then cross down
+                if tide == "BULLISH":
+                    sz_long = last_non_null(ind2.get("safezone_long", []))
+                    s2_price = sz_long  # Buy near SafeZone support
+                elif tide == "BEARISH":
+                    sz_short = last_non_null(ind2.get("safezone_short", []))
+                    s2_price = sz_short  # Sell near SafeZone resistance
+
+            # Screen 3 price: entry trigger level
+            s3_price = None
+            s3_status = "waiting"
+            entry_price = rec.get("entry_price")
+            stop_price = rec.get("stop_price")
+            if s3_aligned and entry_price:
+                s3_price = entry_price
+                s3_status = "aligned"
+            elif s2_aligned and screen3:
+                s3_status = "possible"
+                if tide == "BULLISH":
+                    s3_price = screen3.get("last_high")  # Breakout above prev high
+                elif tide == "BEARISH":
+                    s3_price = screen3.get("last_low")  # Breakdown below prev low
+
             self.alignment = {
                 "screen1": s1_aligned,
                 "screen2": s2_aligned,
@@ -1099,6 +1151,15 @@ class AssetSession:
                 "action": action,
                 "grade": grade,
                 "confidence": confidence,
+                # Price points per screen
+                "s1_price": round(s1_price, 2) if s1_price else None,
+                "s1_status": s1_status,  # aligned | waiting | neutral
+                "s2_price": round(s2_price, 2) if s2_price else None,
+                "s2_status": s2_status,  # aligned | possible | waiting
+                "s3_price": round(s3_price, 2) if s3_price else None,
+                "s3_status": s3_status,  # aligned | possible | waiting
+                "stop_price": round(stop_price, 2) if stop_price else None,
+                "ltp": round(ltp, 2) if ltp else None,
             }
 
             # ── Progressive alignment alerts (with anti-spam) ──

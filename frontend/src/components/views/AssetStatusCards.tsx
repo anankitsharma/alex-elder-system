@@ -13,6 +13,18 @@ const TF_LABELS: Record<string, string> = {
   "15m": "15min", "5m": "5min", "1m": "1min",
 };
 
+function screenStatusColor(status: string | null | undefined): string {
+  if (status === "aligned") return "text-green-400";
+  if (status === "possible") return "text-amber-400";
+  return "text-muted";
+}
+
+function screenStatusIcon(status: string | null | undefined): string {
+  if (status === "aligned") return "\u2713";
+  if (status === "possible") return "\u2192";
+  return "\u25CB";
+}
+
 function ScreenDot({ active, label }: { active: boolean; label: string }) {
   return (
     <span className="flex items-center gap-1">
@@ -95,12 +107,19 @@ function AssetCard({ asset, onSelect }: { asset: CommandCenterAsset; onSelect: (
             <span className="text-muted">{TF_LABELS[tfs["1"] ?? ""] ?? tfs["1"] ?? "—"}</span>
             <span className="text-muted">Tide</span>
           </div>
-          <span className={cn(
-            "font-semibold",
-            a.tide === "BULLISH" ? "text-green-400" : a.tide === "BEARISH" ? "text-red-400" : "text-muted",
-          )}>
-            {a.tide ?? "—"}
-          </span>
+          <div className="flex items-center gap-2">
+            {al?.s1_price != null && (
+              <span className={cn("font-mono text-[9px]", screenStatusColor(al.s1_status))}>
+                {"\u20B9"}{al.s1_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {screenStatusIcon(al.s1_status)}
+              </span>
+            )}
+            <span className={cn(
+              "font-semibold",
+              a.tide === "BULLISH" ? "text-green-400" : a.tide === "BEARISH" ? "text-red-400" : "text-muted",
+            )}>
+              {a.tide ?? "—"}
+            </span>
+          </div>
         </div>
 
         {/* Screen 2 */}
@@ -110,12 +129,19 @@ function AssetCard({ asset, onSelect }: { asset: CommandCenterAsset; onSelect: (
             <span className="text-muted">{TF_LABELS[tfs["2"] ?? ""] ?? tfs["2"] ?? "—"}</span>
             <span className="text-muted">Wave</span>
           </div>
-          <span className={cn(
-            "font-semibold",
-            a.wave_signal === "BUY" ? "text-green-400" : a.wave_signal === "SELL" ? "text-red-400" : "text-muted",
-          )}>
-            {a.wave_signal ?? "—"}
-          </span>
+          <div className="flex items-center gap-2">
+            {al?.s2_price != null && (
+              <span className={cn("font-mono text-[9px]", screenStatusColor(al.s2_status))}>
+                {"\u20B9"}{al.s2_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {screenStatusIcon(al.s2_status)}
+              </span>
+            )}
+            <span className={cn(
+              "font-semibold",
+              a.wave_signal === "BUY" ? "text-green-400" : a.wave_signal === "SELL" ? "text-red-400" : "text-muted",
+            )}>
+              {a.wave_signal ?? "—"}
+            </span>
+          </div>
         </div>
 
         {/* Screen 3 */}
@@ -125,13 +151,28 @@ function AssetCard({ asset, onSelect }: { asset: CommandCenterAsset; onSelect: (
             <span className="text-muted">{TF_LABELS[tfs["3"] ?? ""] ?? tfs["3"] ?? "—"}</span>
             <span className="text-muted">Entry</span>
           </div>
-          <span className={cn(
-            "font-semibold",
-            a.action === "BUY" ? "text-green-400" : a.action === "SELL" ? "text-red-400" : "text-muted",
-          )}>
-            {a.action ?? "WAIT"}
-          </span>
+          <div className="flex items-center gap-2">
+            {al?.s3_price != null && (
+              <span className={cn("font-mono text-[9px]", screenStatusColor(al.s3_status))}>
+                {"\u20B9"}{al.s3_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {screenStatusIcon(al.s3_status)}
+              </span>
+            )}
+            <span className={cn(
+              "font-semibold",
+              a.action === "BUY" ? "text-green-400" : a.action === "SELL" ? "text-red-400" : "text-muted",
+            )}>
+              {a.action ?? "WAIT"}
+            </span>
+          </div>
         </div>
+
+        {/* Stop price from alignment */}
+        {al?.stop_price != null && (
+          <div className="flex items-center justify-between text-[9px] text-muted pt-0.5">
+            <span>Stop Level</span>
+            <span className="font-mono text-red-400/70">{"\u20B9"}{al.stop_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          </div>
+        )}
       </div>
 
       {/* Entry/Stop if actionable */}
