@@ -296,6 +296,9 @@ class AssetSession:
         # Candle counter for periodic reconciliation
         self._candle_count: int = 0
 
+        # Trailing stop update counter (for periodic tightening between candle closes)
+        self._trailing_stop_counter: int = 0
+
         # Trade executor — unified state machine for trade lifecycle
         self._init_executor()
 
@@ -728,6 +731,11 @@ class AssetSession:
         if current_price <= 0:
             return
         try:
+            # Update trailing stops periodically (every 10 checks ≈ 20s)
+            self._trailing_stop_counter += 1
+            if self._trailing_stop_counter % 10 == 0:
+                await self._update_trailing_stops()
+
             async with async_session() as session:
                 positions = await db.load_open_positions_by_symbol(session, self.symbol)
                 for pos in positions:
@@ -1504,17 +1512,22 @@ class AssetSession:
                 # Flip: exit current + enter opposite
                 logger.info("Flipping {} -> {} for {}", existing.direction, pos_direction, self.symbol)
                 current_price = entry
-                # Close existing position in DB
-                async with async_session() as session:
-                    positions = await db.load_open_positions_by_symbol(session, self.symbol)
-                    for pos in positions:
-                        if pos.direction == existing.direction:
-                            await db.close_position(session, pos.id, current_price)
-                # Exit via executor
-                await self.executor.exit_position(
-                    self.symbol, ExitReason.FLIP, current_price=current_price,
-                    token=self.token, exchange=self.exchange,
-                )
+                try:
+                    # Close in DB first
+                    async with async_session() as session:
+                        positions = await db.load_open_positions_by_symbol(session, self.symbol)
+                        for pos in positions:
+                            if pos.direction == existing.direction:
+                                await db.close_position(session, pos.id, current_price)
+                    # Then exit in executor
+                    await self.executor.exit_position(
+                        self.symbol, ExitReason.FLIP, current_price=current_price,
+                        token=self.token, exchange=self.exchange,
+                    )
+                except Exception as e:
+                    logger.critical("FLIP FAILED for {} — DB/executor may be diverged: {}", self.symbol, e)
+                    # Don't proceed with new entry if exit failed
+                    return
 
             # Enter via executor (uses PaperPlacer or LivePlacer internally)
             # Retry up to 2 times for LIVE mode rejections (e.g., transient broker errors)
@@ -1556,6 +1569,13 @@ class AssetSession:
             broker_order_id = exec_pos.entry_order_id or f"PIPE-{signal.id:04d}"
             filled_price = exec_pos.entry_price or entry
             order_status = "COMPLETE" if exec_pos.state.value == "OPEN" else "PENDING"
+
+            # Recalculate target from actual fill price (not theoretical entry)
+            if filled_price and filled_price != limit_price and risk_per_share > 0:
+                if direction == "BUY":
+                    target = round(filled_price + (risk_per_share * rr_multiplier), 2)
+                else:
+                    target = round(filled_price - (risk_per_share * rr_multiplier), 2)
 
             # Persist to DB
             async with async_session() as session:

@@ -280,10 +280,18 @@ async def _heartbeat_loop():
             except Exception as e:
                 logger.debug("Order fill poll error: {}", e)
 
-        # ── EOD auto-close check (every 30s) ──
+        # ── EOD auto-close check (tighter near market close) ──
         if not hasattr(_heartbeat_loop, '_last_eod_check'):
             _heartbeat_loop._last_eod_check = 0.0
-        if now - _heartbeat_loop._last_eod_check >= 30:
+        # Tighter EOD check near market close (every 10s in last 10 min)
+        try:
+            from datetime import datetime as _dt_eod
+            from app.pipeline.market_hours import IST as _IST_eod
+            _now_eod = _dt_eod.now(_IST_eod)
+            eod_interval = 10 if (_now_eod.hour == 15 and _now_eod.minute >= 20) else 30
+        except Exception:
+            eod_interval = 30
+        if now - _heartbeat_loop._last_eod_check >= eod_interval:
             _heartbeat_loop._last_eod_check = now
             try:
                 await _check_eod_close(pipeline_manager)
