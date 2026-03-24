@@ -185,6 +185,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_auto_start_pipeline())
     asyncio.create_task(_connect_broker())
 
+    # Start Telegram command bot
+    from app.notifications.telegram_bot import start_bot_polling
+    asyncio.create_task(start_bot_polling())
+
     # Expose broker state for API/frontend
     app.state.broker_state = _broker_state
 
