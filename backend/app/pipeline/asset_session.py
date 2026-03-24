@@ -945,6 +945,41 @@ class AssetSession:
         except Exception as e:
             logger.debug("Trailing stop update failed for {}: {}", self.symbol, e)
 
+    def _detect_gap(self) -> dict:
+        """Detect and classify the opening gap for the current session."""
+        screen2_tf = self.screen_timeframes.get("2", "1d")
+        df = self.candle_buffers.get(screen2_tf)
+        if df is None or not isinstance(df, pd.DataFrame) or len(df) < 2:
+            return {"gap_pct": 0, "gap_direction": None, "gap_class": "NORMAL"}
+
+        prev_close = float(df.iloc[-2].get("close", 0))
+        today_open = float(df.iloc[-1].get("open", 0))
+
+        if prev_close <= 0 or today_open <= 0:
+            return {"gap_pct": 0, "gap_direction": None, "gap_class": "NORMAL"}
+
+        gap_pct = abs(today_open - prev_close) / prev_close
+        gap_direction = "UP" if today_open > prev_close else "DOWN" if today_open < prev_close else None
+
+        if gap_pct < 0.003:
+            gap_class = "NORMAL"
+        elif gap_pct < 0.01:
+            gap_class = "SMALL"
+        elif gap_pct < 0.02:
+            gap_class = "MEDIUM"
+        elif gap_pct < 0.03:
+            gap_class = "LARGE"
+        else:
+            gap_class = "EXTREME"
+
+        return {
+            "gap_pct": round(gap_pct * 100, 2),
+            "gap_direction": gap_direction,
+            "gap_class": gap_class,
+            "prev_close": prev_close,
+            "today_open": today_open,
+        }
+
     async def _evaluate_signals(self):
         """Run Triple Screen analysis on latest indicator data (under lock).
 
@@ -961,6 +996,20 @@ class AssetSession:
         """Inner signal evaluation (called under lock)."""
         # Process any signals queued from previous session close
         await self._process_queued_signals()
+
+        # ── Opening Range Blackout: suppress NEW signals for first N min after open ──
+        from app.pipeline.market_hours import get_session as _get_mkt_session, IST
+        from datetime import datetime as _dt
+        _now = _dt.now(IST)
+        _mkt = _get_mkt_session(self.exchange, self.symbol, _now)
+        _open_time = _now.replace(
+            hour=_mkt.open_time.hour, minute=_mkt.open_time.minute, second=0,
+        )
+        _minutes_since_open = (_now - _open_time).total_seconds() / 60
+        if 0 < _minutes_since_open < settings.opening_range_minutes:
+            # Still in opening range — only process queued signals, skip new signal generation
+            await self._process_queued_signals()
+            return
 
         try:
             from app.strategy.triple_screen import TripleScreenAnalysis
@@ -1165,6 +1214,12 @@ class AssetSession:
                 "ltp": round(ltp, 2) if ltp else None,
             }
 
+            # Include gap info in alignment for frontend display
+            gap_info = self._detect_gap()
+            self.alignment["gap_class"] = gap_info.get("gap_class", "NORMAL")
+            self.alignment["gap_pct"] = gap_info.get("gap_pct", 0)
+            self.alignment["gap_direction"] = gap_info.get("gap_direction")
+
             # ── Progressive alignment alerts (with anti-spam) ──
             # AlertStateManager handles: cooldowns, hysteresis, direction flips,
             # and oscillation suppression (tide toggling near boundary)
@@ -1327,6 +1382,67 @@ class AssetSession:
                                     return
         except Exception:
             pass  # If DB check fails, proceed anyway
+
+        # ── Gap-open handling: direction filter + confidence penalty + ORB entry ──
+        gap_info = self._detect_gap()
+        gap_class = gap_info.get("gap_class", "NORMAL")
+        gap_direction = gap_info.get("gap_direction")
+
+        if gap_class != "NORMAL":
+            signal_direction_matches_gap = (
+                (direction == "LONG" and gap_direction == "UP") or
+                (direction == "SHORT" and gap_direction == "DOWN")
+            )
+
+            if signal_direction_matches_gap:
+                # Chasing the gap — higher risk
+                if gap_class == "EXTREME":
+                    logger.info(
+                        "Signal REJECTED: {} — extreme gap {:.1f}% in same direction",
+                        self.symbol, gap_info["gap_pct"],
+                    )
+                    return
+                # Reduce confidence for gap-chasing signals (Rule 6)
+                confidence = int(confidence * settings.gap_chase_confidence_penalty)
+                logger.info(
+                    "Gap penalty: {} confidence reduced to {}% (gap {:.1f}% {})",
+                    self.symbol, confidence, gap_info["gap_pct"], gap_class,
+                )
+            else:
+                # Opposing the gap — gap fill trade (higher probability)
+                # Small penalty since gap fill is statistically likely but large gaps risky
+                if gap_class in ("LARGE", "EXTREME"):
+                    confidence = int(confidence * 0.85)  # 15% penalty for large counter-gap
+
+            # Volume check for gap signals (Rule 4 — simplified)
+            if gap_class in ("MEDIUM", "LARGE", "EXTREME"):
+                screen3_tf = self.screen_timeframes.get("3", "15m")
+                vol_data = self.indicators.get(screen3_tf, {}).get("volume", [])
+                if not vol_data or not any(v for v in vol_data[-3:] if v and v > 0):
+                    confidence = int(confidence * 0.8)  # Additional 20% penalty if no volume data
+
+            # ORB entry override (Rule 5): use 15-min high/low as trigger
+            if gap_class not in ("NORMAL", "EXTREME"):
+                screen3_tf = self.screen_timeframes.get("3", "15m")
+                orb_df = self.candle_buffers.get(screen3_tf)
+                if orb_df is not None and isinstance(orb_df, pd.DataFrame) and len(orb_df) >= 1:
+                    orb_candle = orb_df.iloc[-1]  # Most recent 15-min bar
+                    if direction == "LONG":
+                        entry_price = float(orb_candle.get("high", entry_price))
+                    else:
+                        entry_price = float(orb_candle.get("low", entry_price))
+                    logger.info(
+                        "ORB entry for {}: {} @ {:.2f} (gap {})",
+                        self.symbol, action, entry_price, gap_class,
+                    )
+
+            # Re-check confidence threshold after gap penalties
+            if confidence < settings.min_signal_score:
+                logger.info(
+                    "Signal rejected after gap penalty: {} confidence {}% < {}%",
+                    self.symbol, confidence, settings.min_signal_score,
+                )
+                return
 
         # Risk gate: Circuit Breaker (singleton, persisted)
         try:

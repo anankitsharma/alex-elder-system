@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     flip_confirm_bars: int = 2           # Consecutive bars to confirm tide flip
     wave_confirm_bars: int = 2           # Consecutive bars to confirm wave change
 
+    # Gap-open handling
+    opening_range_minutes: int = 15  # Minutes after open to suppress new signals
+    gap_chase_confidence_penalty: float = 0.7  # 30% confidence reduction for gap-chasing
+
     # Revenge trading prevention
     max_consecutive_losses: int = 3   # Lock out after N consecutive losing trades
     loss_cooldown_minutes: int = 30   # Cooldown period after lockout
