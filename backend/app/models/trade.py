@@ -48,6 +48,7 @@ class Position(Base):
     risk_percent: Mapped[float] = mapped_column(Float, default=0.0)
     mae: Mapped[float] = mapped_column(Float, default=0.0)  # Max Adverse Excursion (worst unrealized loss)
     mfe: Mapped[float] = mapped_column(Float, default=0.0)  # Max Favorable Excursion (best unrealized profit)
+    position_type: Mapped[str] = mapped_column(String(15), default="POSITIONAL")  # INTRADAY or POSITIONAL
     mode: Mapped[str] = mapped_column(String(10))  # PAPER, LIVE
     status: Mapped[str] = mapped_column(String(10), default="OPEN")
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

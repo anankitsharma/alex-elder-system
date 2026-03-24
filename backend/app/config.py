@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     rr_target_multiplier: float = 2.0  # Risk:Reward ratio for target (2.0 = 1:2)
     limit_order_buffer_pct: float = 0.005  # Limit order buffer (0.005 = 0.5%)
     min_stop_distance_pct: float = 0.01  # Min stop distance (0.01 = 1% from entry)
+    default_position_type: str = "POSITIONAL"  # POSITIONAL (carry overnight) or INTRADAY (close at EOD)
+    max_gap_pct: float = 0.02  # Max acceptable gap for queued signal execution (2%)
+    overnight_risk_pct: float = 1.0  # Reduced risk for overnight positions (1% vs 2%)
 
     # Regime detection
     adx_filter_enabled: bool = True      # Enable ADX-based regime filter

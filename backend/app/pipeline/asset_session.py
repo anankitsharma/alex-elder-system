@@ -1668,6 +1668,7 @@ class AssetSession:
                     "current_price": filled_price,
                     "risk_amount": sizing.get("risk_amount", 0),
                     "risk_percent": sizing.get("actual_risk_pct", 0),
+                    "position_type": settings.default_position_type,
                     "mode": mode,
                 })
 

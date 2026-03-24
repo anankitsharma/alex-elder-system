@@ -436,11 +436,16 @@ async def _check_eod_close(pipeline_manager):
             continue
         setattr(_check_eod_close, eod_key, True)
 
-        # Close all open positions for this symbol
+        # Close INTRADAY positions only — POSITIONAL positions carry overnight
         try:
             async with async_session() as db_session:
                 positions = await db.load_open_positions_by_symbol(db_session, session.symbol)
                 for pos in positions:
+                    # Skip POSITIONAL positions — they carry forward
+                    pos_type = getattr(pos, "position_type", "POSITIONAL")
+                    if pos_type == "POSITIONAL":
+                        logger.info("EOD: {} {} position carries forward (POSITIONAL)", pos.direction, session.symbol)
+                        continue
                     # Get current price from running bar
                     current_price = 0
                     for tf, builder in session.candle_builders.items():

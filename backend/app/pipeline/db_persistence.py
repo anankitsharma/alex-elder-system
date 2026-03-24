@@ -318,6 +318,7 @@ async def save_position(session: AsyncSession, position_data: dict) -> Position:
         unrealized_pnl=position_data.get("unrealized_pnl", 0.0),
         risk_amount=position_data.get("risk_amount", 0.0),
         risk_percent=position_data.get("risk_percent", 0.0),
+        position_type=position_data.get("position_type", "POSITIONAL"),
         mode=position_data.get("mode", "PAPER"),
         status="OPEN",
     )
