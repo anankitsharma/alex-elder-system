@@ -727,7 +727,15 @@ class AssetSession:
             return
 
     async def _check_stop_losses_inner(self, current_price: float):
-        """Inner stop/target check (called under lock)."""
+        """Inner stop/target check (called under lock).
+
+        Special handling for gap-through-stop at market open:
+        - Small gap (<=1% past stop): exit immediately at current price
+        - Large gap (>1%, <=2%): exit at current price with buffer
+        - Extreme gap (>2%): wait 5 minutes then exit (partial recovery likely)
+        Stop exits use current_price (open price) — never the stop price,
+        because you can't fill at your stop when the market gaps past it.
+        """
         if current_price <= 0:
             return
         try:
@@ -1764,7 +1772,26 @@ class AssetSession:
         return True, "OK"
 
     async def _auto_execute(self, signal, sizing: dict, analysis: dict):
-        """Auto-execute trade via TradeExecutor (PAPER and LIVE modes)."""
+        """Auto-execute trade via TradeExecutor (PAPER and LIVE modes).
+
+        Respects entry blackout: no new orders in first 5 minutes after
+        market open (NSE 9:15-9:20, MCX 9:00-9:05). This avoids the
+        opening auction noise and wide spreads.
+        """
+        # Entry blackout: no new orders in first 5 min after open
+        try:
+            from app.pipeline.market_hours import get_session as _get_mkt, IST
+            from datetime import datetime as _dt
+            _now = _dt.now(IST)
+            _mkt = _get_mkt(self.exchange, self.symbol, _now)
+            _open_dt = _now.replace(hour=_mkt.open_time.hour, minute=_mkt.open_time.minute, second=0)
+            _min_since_open = (_now - _open_dt).total_seconds() / 60
+            if 0 < _min_since_open < settings.entry_blackout_minutes:
+                logger.info("Entry blackout: {} — {:.0f} min since open, waiting until 5 min", self.symbol, _min_since_open)
+                return
+        except Exception:
+            pass
+
         rec = analysis["recommendation"]
         direction = "BUY" if rec["action"] == "BUY" else "SELL"
         pos_direction = "LONG" if direction == "BUY" else "SHORT"

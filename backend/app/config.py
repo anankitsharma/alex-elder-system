@@ -65,6 +65,7 @@ class Settings(BaseSettings):
 
     # Gap-open handling
     opening_range_minutes: int = 15  # Minutes after open to suppress new signals
+    entry_blackout_minutes: int = 5  # Minutes after open to block new order placement (9:15-9:20)
     gap_chase_confidence_penalty: float = 0.7  # 30% confidence reduction for gap-chasing
 
     # Revenge trading prevention
