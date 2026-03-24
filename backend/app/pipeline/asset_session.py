@@ -872,8 +872,8 @@ class AssetSession:
                                     target_price=pos.target_price or 0,
                                     mode=pos.mode or settings.trading_mode,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning("Position close notification failed: {}", e)
                 # Broadcast portfolio update for real-time dashboard
                 total_unrealized = sum(
                     (current_price - p.entry_price) * p.quantity if p.direction == "LONG"
@@ -1233,6 +1233,24 @@ class AssetSession:
             # and oscillation suppression (tide toggling near boundary)
             should_alert = self._alert_mgr.check_alignment_alert(level, direction)
 
+            # ── Tide/Wave state change alerts (always, not gated by should_alert) ──
+            # Notify when tide direction changes (regardless of alignment level)
+            prev_tide = getattr(self, "_prev_tide", None)
+            if tide and tide != prev_tide and prev_tide is not None:
+                try:
+                    from app.notifications.telegram import _send, Priority
+                    emoji = "🟢" if tide == "BULLISH" else "🔴" if tide == "BEARISH" else "⚪"
+                    await _send(
+                        f"{emoji} <b>{self.symbol}</b> — Tide changed: "
+                        f"<b>{prev_tide}</b> → <b>{tide}</b>\n"
+                        f"LTP: ₹{ltp:,.2f}" if ltp else "",
+                        priority=Priority.NORMAL,
+                    )
+                except Exception as e:
+                    logger.debug("Tide change notification failed: {}", e)
+            self._prev_tide = tide
+
+            # ── Progressive alignment alerts (with anti-spam) ──
             if should_alert:
                 try:
                     from app.notifications.telegram import _send, Priority
@@ -1264,8 +1282,8 @@ class AssetSession:
                             priority=Priority.HIGH,
                             discord_color="buy" if action == "BUY" else "sell",
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Alignment notification failed: {}", e)
 
             # Auto-execute on full alignment
             if s3_aligned:
@@ -1973,8 +1991,9 @@ class AssetSession:
                     self.symbol, direction, shares, filled_price, stop,
                     broker_order_id, mode, analysis.get("grade", "?"),
                 )
-            except Exception:
-                pass
+                logger.info("Trade notification sent for {} {} {}", direction, self.symbol, mode)
+            except Exception as e:
+                logger.warning("Trade notification failed for {}: {}", self.symbol, e)
 
             await self._broadcast_event("order", {
                 "symbol": self.symbol,
