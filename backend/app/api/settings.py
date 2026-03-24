@@ -37,6 +37,7 @@ DEFAULTS: Dict[str, Any] = {
         "max_risk_per_trade_pct": app_settings.max_risk_per_trade_pct,
         "max_portfolio_risk_pct": app_settings.max_portfolio_risk_pct,
         "min_signal_score": app_settings.min_signal_score,
+        "default_position_type": app_settings.default_position_type,
     },
     "display": {
         "default_symbol": "NIFTY",

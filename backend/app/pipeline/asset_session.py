@@ -959,6 +959,9 @@ class AssetSession:
 
     async def _evaluate_signals_inner(self):
         """Inner signal evaluation (called under lock)."""
+        # Process any signals queued from previous session close
+        await self._process_queued_signals()
+
         try:
             from app.strategy.triple_screen import TripleScreenAnalysis
 
@@ -1438,6 +1441,53 @@ class AssetSession:
             logger.warning("Risk gate error: {}", e)
             sizing = {"shares": 0, "risk_amount": 0}
 
+        # ── Overnight risk reduction for POSITIONAL trades ──
+        # Check per-asset position type, falling back to global default
+        position_type = settings.default_position_type  # Global default
+        try:
+            async with async_session() as pt_session:
+                from sqlalchemy import select as _pt_sel
+                from app.models.user import UserAssetSettings
+                pt_stmt = _pt_sel(UserAssetSettings).where(
+                    UserAssetSettings.symbol == self.symbol,
+                    UserAssetSettings.exchange == self.exchange,
+                )
+                if self.user_id:
+                    pt_stmt = pt_stmt.where(UserAssetSettings.user_id == self.user_id)
+                pt_result = await pt_session.execute(pt_stmt)
+                asset_cfg = pt_result.scalar_one_or_none()
+                if asset_cfg and asset_cfg.default_position_type:
+                    position_type = asset_cfg.default_position_type
+        except Exception:
+            pass
+
+        if position_type == "POSITIONAL" and sizing.get("shares", 0) > 0:
+            overnight_scale = settings.overnight_risk_pct / settings.max_risk_per_trade_pct
+            if overnight_scale < 1.0:
+                original = sizing["shares"]
+                sizing["shares"] = max(1, int(sizing["shares"] * overnight_scale))
+                if sizing["shares"] != original:
+                    logger.info(
+                        "Overnight risk reduction {}: {} -> {} shares (scale={:.0%})",
+                        self.symbol, original, sizing["shares"], overnight_scale,
+                    )
+
+        # ── Check if market is near close — queue signal instead of executing ──
+        from app.pipeline.market_hours import get_eod_cutoff, IST
+        from datetime import datetime as _dt
+        now_ist = _dt.now(IST)
+        cutoff = get_eod_cutoff(self.exchange, self.symbol)
+        cutoff_dt = now_ist.replace(hour=cutoff.hour, minute=cutoff.minute, second=0)
+        minutes_to_close = (cutoff_dt - now_ist).total_seconds() / 60
+
+        signal_status = "PENDING_CONFIRMATION" if settings.trading_mode == "LIVE" else "ACTIVE"
+        if 0 < minutes_to_close <= 10:
+            signal_status = "QUEUED"
+            logger.info(
+                "Signal queued for next open: {} {} ({}min to close)",
+                action, self.symbol, int(minutes_to_close),
+            )
+
         # Save signal to DB
         direction = "LONG" if action == "BUY" else "SHORT"
         try:
@@ -1452,10 +1502,21 @@ class AssetSession:
                     "confirmations": analysis.get("validation", {}).get("warnings", []),
                     "entry_price": entry_price,
                     "stop_price": stop_price,
-                    "status": "PENDING_CONFIRMATION" if settings.trading_mode == "LIVE" else "ACTIVE",
+                    "status": signal_status,
                 })
         except Exception as e:
             logger.error("Signal DB save failed: {}", e)
+            return
+
+        # If queued, don't execute now — will be processed at next market open
+        if signal_status == "QUEUED":
+            await self._broadcast_event("signal_queued", {
+                "symbol": self.symbol,
+                "direction": direction,
+                "entry_price": entry_price,
+                "stop_price": stop_price,
+                "minutes_to_close": int(minutes_to_close),
+            })
             return
 
         # Execute
@@ -1463,6 +1524,87 @@ class AssetSession:
             await self._auto_execute(signal, sizing, analysis)
         else:
             logger.info("Signal {} skipped: zero shares from position sizer", signal.id)
+
+    async def _process_queued_signals(self):
+        """Process signals queued overnight -- execute at market open with gap check.
+
+        Called at the beginning of _evaluate_signals. Only runs during the first
+        15 minutes after market open. Checks gap percentage against max_gap_pct
+        and skips signals with excessive gaps.
+        """
+        from app.pipeline.market_hours import is_market_open, get_session as _get_session, IST
+        from datetime import datetime as _dt
+
+        if not is_market_open(self.exchange, self.symbol):
+            return
+
+        now_ist = _dt.now(IST)
+        session_info = _get_session(self.exchange, self.symbol)
+        open_time = now_ist.replace(
+            hour=session_info.open_time.hour,
+            minute=session_info.open_time.minute,
+            second=0, microsecond=0,
+        )
+        # Only process in first 15 minutes after open
+        seconds_since_open = (now_ist - open_time).total_seconds()
+        if seconds_since_open < 0 or seconds_since_open > 900:
+            return
+
+        try:
+            async with async_session() as session:
+                from sqlalchemy import select
+                from app.models.signal import Signal
+                stmt = select(Signal).where(
+                    Signal.symbol == self.symbol,
+                    Signal.status == "QUEUED",
+                )
+                result = await session.execute(stmt)
+                queued = result.scalars().all()
+
+                if not queued:
+                    return
+
+                # Get current price from latest candle
+                ltp = None
+                screen3_tf = self.screen_timeframes.get("3", "1h")
+                buf = self.candle_buffers.get(screen3_tf)
+                if buf is not None and not buf.empty:
+                    ltp = float(buf.iloc[-1]["close"])
+
+                for sig in queued:
+                    if not ltp:
+                        sig.status = "SKIPPED"
+                        logger.info("Queued signal skipped for {}: no LTP available", sig.symbol)
+                        continue
+
+                    # Gap check
+                    gap_pct = abs(ltp - sig.entry_price) / sig.entry_price if sig.entry_price else 0
+                    if gap_pct > settings.max_gap_pct:
+                        sig.status = "SKIPPED"
+                        logger.info(
+                            "Queued signal skipped: {} gap {:.1f}% > {:.1f}% max",
+                            sig.symbol, gap_pct * 100, settings.max_gap_pct * 100,
+                        )
+                    else:
+                        # Execute with adjusted entry price
+                        sig.status = "ACTIVE"
+                        sig.entry_price = ltp
+                        # Recalculate stop maintaining same risk distance
+                        if sig.direction == "LONG":
+                            risk_distance = abs(sig.entry_price - sig.stop_price) if sig.stop_price else ltp * 0.02
+                            sig.stop_price = round(ltp - risk_distance, 2)
+                        else:
+                            risk_distance = abs(sig.stop_price - sig.entry_price) if sig.stop_price else ltp * 0.02
+                            sig.stop_price = round(ltp + risk_distance, 2)
+
+                        logger.info(
+                            "Queued signal activated: {} {} at {:.2f} (gap {:.1f}%)",
+                            sig.direction, sig.symbol, ltp, gap_pct * 100,
+                        )
+
+                await session.commit()
+        except Exception as e:
+            logger.error("Error processing queued signals for {}: {}", self.symbol, e)
 
     def _validate_order(self, direction: str, quantity: int, price: float, stop: float) -> tuple:
         """Pre-trade validation — independent sanity checks before order placement.

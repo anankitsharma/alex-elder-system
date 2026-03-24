@@ -83,6 +83,7 @@ interface AssetSettings {
   screen2_timeframe: string | null;
   screen3_timeframe: string | null;
   max_risk_pct_override: number | null;
+  default_position_type: "INTRADAY" | "POSITIONAL" | null;
 }
 
 // ── Inline config panel for expanded asset row ──
@@ -110,6 +111,9 @@ function AssetConfigPanel({
       ? String(currentSettings.max_risk_pct_override)
       : ""
   );
+  const [positionType, setPositionType] = useState<"POSITIONAL" | "INTRADAY">(
+    currentSettings?.default_position_type ?? "POSITIONAL"
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -128,6 +132,7 @@ function AssetConfigPanel({
             screen2_timeframe: s2 || null,
             screen3_timeframe: s3 || null,
             max_risk_pct_override: riskPct ? parseFloat(riskPct) : null,
+            default_position_type: positionType,
             user_id: 1,
           }),
         }
@@ -176,6 +181,42 @@ function AssetConfigPanel({
               LIVE
             </button>
           </div>
+        </div>
+
+        {/* Position Type */}
+        <div>
+          <label className="text-[11px] font-semibold text-muted uppercase tracking-wider block mb-2">
+            Position Type
+          </label>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPositionType("POSITIONAL")}
+              className={cn(
+                "px-3 py-1.5 rounded-md text-[11px] font-medium border transition-colors",
+                positionType === "POSITIONAL"
+                  ? "bg-blue-500/20 text-blue-400 border-blue-500/40"
+                  : "bg-background text-muted border-border hover:border-muted"
+              )}
+            >
+              POSITIONAL
+            </button>
+            <button
+              onClick={() => setPositionType("INTRADAY")}
+              className={cn(
+                "px-3 py-1.5 rounded-md text-[11px] font-medium border transition-colors",
+                positionType === "INTRADAY"
+                  ? "bg-purple-500/20 text-purple-400 border-purple-500/40"
+                  : "bg-background text-muted border-border hover:border-muted"
+              )}
+            >
+              INTRADAY
+            </button>
+          </div>
+          <span className="text-[10px] text-muted/60 mt-1 block">
+            {positionType === "POSITIONAL"
+              ? "Carries overnight with reduced risk sizing"
+              : "Auto-closes at EOD cutoff"}
+          </span>
         </div>
 
         {/* Timeframes */}
@@ -525,6 +566,19 @@ export default function AssetsView() {
                             ) : (
                               <span className="text-[10px] text-muted w-10 text-center">
                                 --
+                              </span>
+                            )}
+                            {/* Position Type badge */}
+                            {settings?.default_position_type && (
+                              <span
+                                className={cn(
+                                  "px-1.5 py-0.5 rounded-full text-[9px] font-bold",
+                                  settings.default_position_type === "INTRADAY"
+                                    ? "bg-purple-500/20 text-purple-400"
+                                    : "bg-blue-500/20 text-blue-400"
+                                )}
+                              >
+                                {settings.default_position_type === "INTRADAY" ? "INTRA" : "POS"}
                               </span>
                             )}
                             {/* Timeframes */}

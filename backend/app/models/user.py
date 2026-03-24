@@ -162,5 +162,8 @@ class UserAssetSettings(Base):
     # Per-asset risk overrides (nullable = use user defaults)
     max_risk_pct_override: Mapped[float] = mapped_column(Float, nullable=True)
 
+    # Position type: INTRADAY (close at EOD) or POSITIONAL (carry overnight)
+    default_position_type: Mapped[str] = mapped_column(String(15), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -518,6 +518,7 @@ export interface RiskSettings {
   max_risk_per_trade_pct: number;
   max_portfolio_risk_pct: number;
   min_signal_score: number;
+  default_position_type: string;
 }
 
 export interface DisplaySettings {

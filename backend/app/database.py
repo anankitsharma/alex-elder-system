@@ -29,9 +29,26 @@ class Base(DeclarativeBase):
 
 
 async def init_db():
-    """Create all tables."""
+    """Create all tables and run lightweight migrations for new columns."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Lightweight column migrations for SQLite (create_all won't add columns
+    # to existing tables). Each migration is idempotent — silently skips if
+    # the column already exists.
+    _migrations = [
+        ("user_asset_settings", "default_position_type", "VARCHAR(15)"),
+    ]
+    async with engine.begin() as conn:
+        for table, column, col_type in _migrations:
+            try:
+                await conn.execute(
+                    __import__("sqlalchemy").text(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                    )
+                )
+            except Exception:
+                pass  # Column already exists
 
 
 async def get_db():

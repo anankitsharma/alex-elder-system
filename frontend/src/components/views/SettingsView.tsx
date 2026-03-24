@@ -343,7 +343,7 @@ export default function SettingsView() {
           COMMODITY: { screen1: "1d", screen2: "1h", screen3: "15m" },
           DEFAULT: { screen1: "1d", screen2: "4h", screen3: "1h" },
         },
-        risk: { max_risk_per_trade_pct: 2.0, max_portfolio_risk_pct: 6.0, min_signal_score: 65 },
+        risk: { max_risk_per_trade_pct: 2.0, max_portfolio_risk_pct: 6.0, min_signal_score: 65, default_position_type: "POSITIONAL" },
         display: {
           default_symbol: "NIFTY",
           default_exchange: "NFO",
@@ -443,7 +443,7 @@ export default function SettingsView() {
 
   /* ── risk update ────────────────────────────────── */
 
-  const updateRisk = (field: keyof RiskSettings, value: number) => {
+  const updateRisk = (field: keyof RiskSettings, value: number | string) => {
     if (!settings) return;
     const r = { ...settings.risk, [field]: value };
     setSettings({ ...settings, risk: r });
@@ -674,6 +674,23 @@ export default function SettingsView() {
                 />
                 <span className="text-[9px] text-muted mt-0.5 block">Minimum confidence to trade</span>
               </div>
+            </div>
+
+            {/* Default Position Type */}
+            <div className="mt-4 pt-4 border-t border-border">
+              <label className="text-[10px] text-muted block mb-1">Default Position Type</label>
+              <Select
+                value={settings.risk.default_position_type || "POSITIONAL"}
+                options={[
+                  { value: "POSITIONAL", label: "Positional (carry overnight)" },
+                  { value: "INTRADAY", label: "Intraday (close at EOD)" },
+                ]}
+                onChange={(v) => updateRisk("default_position_type", v)}
+              />
+              <span className="text-[9px] text-muted mt-0.5 block">
+                Positional trades use reduced risk sizing ({((1.0 / 2.0) * 100).toFixed(0)}% of normal).
+                Intraday trades auto-close before market close.
+              </span>
             </div>
 
             {saving === "risk" && (

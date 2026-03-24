@@ -678,6 +678,7 @@ async def get_asset_settings(
                 "screen2_timeframe": s.screen2_timeframe,
                 "screen3_timeframe": s.screen3_timeframe,
                 "max_risk_pct_override": s.max_risk_pct_override,
+                "default_position_type": s.default_position_type,
             }
             for s in settings_list
         ]
@@ -692,6 +693,7 @@ class AssetConfigRequest(BaseModel):
     screen2_timeframe: Optional[str] = None  # e.g. "1d", "1h"
     screen3_timeframe: Optional[str] = None  # e.g. "1h", "15m"
     max_risk_pct_override: Optional[float] = None
+    default_position_type: Optional[str] = None  # INTRADAY or POSITIONAL
     user_id: int = 1
 
 
@@ -762,6 +764,10 @@ async def update_asset_settings(symbol: str, req: AssetConfigRequest):
             asset_settings.screen3_timeframe = req.screen3_timeframe
         if req.max_risk_pct_override is not None:
             asset_settings.max_risk_pct_override = req.max_risk_pct_override
+        if req.default_position_type is not None:
+            if req.default_position_type not in ("INTRADAY", "POSITIONAL"):
+                raise HTTPException(400, f"Invalid position type: {req.default_position_type}. Valid: INTRADAY, POSITIONAL")
+            asset_settings.default_position_type = req.default_position_type
 
         await session.commit()
         await session.refresh(asset_settings)
@@ -823,6 +829,7 @@ async def update_asset_settings(symbol: str, req: AssetConfigRequest):
         "screen2_timeframe": asset_settings.screen2_timeframe,
         "screen3_timeframe": asset_settings.screen3_timeframe,
         "max_risk_pct_override": asset_settings.max_risk_pct_override,
+        "default_position_type": asset_settings.default_position_type,
         "restarted": restart_needed,
     }
 
